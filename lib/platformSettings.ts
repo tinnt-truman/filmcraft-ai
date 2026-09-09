@@ -22,6 +22,7 @@ export {
 const MODE_LABEL: Record<string, string> = {
   MockLlmProvider: "Mock (offline)",
   RealLlmProvider: "Thật (chưa hoàn thiện)",
+  DeepSeekLlmProvider: "DeepSeek",
   NineRouterLlmProvider: "9Router",
   MockImageProvider: "Mock (offline)",
   RealImageProvider: "Thật (chưa hoàn thiện)",

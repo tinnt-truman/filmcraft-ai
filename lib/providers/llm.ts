@@ -35,6 +35,44 @@ class RealLlmProvider implements LlmProvider {
 }
 
 /**
+ * DeepSeek — https://api.deepseek.com, API tương thích OpenAI Chat
+ * Completions (đã xác nhận trong docs chính thức: platform.deepseek.com/api-docs).
+ * Set DEEPSEEK_API_KEY trong .env (hoặc /admin -> "Cấu hình AI") là dùng
+ * được ngay, không cần hoàn thiện thêm gì (khác RealLlmProvider ở trên).
+ * Model mặc định "deepseek-chat" (DeepSeek-V3); đổi qua DEEPSEEK_MODEL nếu
+ * muốn dùng "deepseek-reasoner" (R1).
+ */
+class DeepSeekLlmProvider implements LlmProvider {
+  async generateText(input: { systemPrompt?: string; prompt: string; maxTokens?: number }): Promise<string> {
+    const apiKey = await getConfigValue("DEEPSEEK_API_KEY");
+    if (!apiKey) {
+      throw new Error("Thiếu DEEPSEEK_API_KEY — set trong /admin (mục \"Cấu hình AI\") hoặc .env.");
+    }
+    const model = (await getConfigValue("DEEPSEEK_MODEL")) || "deepseek-chat";
+    const baseUrl = ((await getConfigValue("DEEPSEEK_BASE_URL")) || "https://api.deepseek.com").replace(/\/+$/, "");
+    const messages = [
+      ...(input.systemPrompt ? [{ role: "system", content: input.systemPrompt }] : []),
+      { role: "user", content: input.prompt },
+    ];
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages, ...(input.maxTokens ? { max_tokens: input.maxTokens } : {}) }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`DeepSeek API trả lỗi HTTP ${res.status}: ${detail.slice(0, 500)}`);
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (typeof text !== "string") {
+      throw new Error("DeepSeek API trả về response không đúng định dạng OpenAI chat completions.");
+    }
+    return text;
+  }
+}
+
+/**
  * 9Router — gateway local OpenAI-compatible (xem lib/providers/nineRouter.ts).
  * Gọi thẳng POST /v1/chat/completions, endpoint đã xác nhận có trong 9Router.
  */
@@ -62,6 +100,10 @@ class NineRouterLlmProvider implements LlmProvider {
 export async function getLlmProvider(): Promise<LlmProvider> {
   if (await nineRouterEnabled()) {
     return new NineRouterLlmProvider();
+  }
+  const deepseekKey = await getConfigValue("DEEPSEEK_API_KEY");
+  if (deepseekKey) {
+    return new DeepSeekLlmProvider();
   }
   const anthropicKey = await getConfigValue("ANTHROPIC_API_KEY");
   const openaiKey = await getConfigValue("OPENAI_API_KEY");
