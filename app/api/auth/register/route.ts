@@ -1,22 +1,38 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { hashPw, verifyPw } from "@/lib/password";
-import { signSession, setSessionCookie, err } from "@/lib/api";
+import { NextRequest } from "next/server";
+import bcrypt from "bcryptjs";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { apiError, apiOk } from "@/lib/apiError";
 
-export async function POST(req: Request) {
-  const { email, password, name } = await req.json().catch(() => ({}));
-  if (!email || !password) return err("VALIDATION", "Thiếu email/mật khẩu", 422);
-  const ex = await prisma.user.findUnique({ where: { email } });
-  if (ex) return err("EXISTS", "Email đã tồn tại", 409);
-  const u = await prisma.user.create({ data: { email, passwordHash: await hashPw(password), name } });
-  await prisma.wallet.create({ data: { userId: u.id, balance: 0 } });
-  const token = await signSession(u.id);
-  const res = NextResponse.json({ id: u.id, email: u.email });
-  setSessionCookie(res, token);
-  return res;
-}
+const RegisterSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8, "Mật khẩu tối thiểu 8 ký tự"),
+  name: z.string().min(1).optional(),
+});
 
-export async function GET() {
-  return NextResponse.json({ hint: "POST email/password/name" });
+export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => null);
+  const parsed = RegisterSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu đăng ký không hợp lệ.", parsed.error.flatten());
+  }
+  const { email, password, name } = parsed.data;
+
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    return apiError(409, "EMAIL_TAKEN", "Email này đã được đăng ký.");
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = await prisma.user.create({
+    data: {
+      email,
+      passwordHash,
+      name,
+      wallet: { create: { balance: 0, heldAmount: 0 } },
+    },
+    select: { id: true, email: true, name: true, createdAt: true },
+  });
+
+  return apiOk(user, 201);
 }
-void verifyPw;

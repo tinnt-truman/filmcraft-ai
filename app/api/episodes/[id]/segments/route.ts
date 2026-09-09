@@ -1,24 +1,31 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
+import { findOwnedEpisode } from "@/lib/ownership";
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy", 404);
-  const segs = await prisma.segment.findMany({ where: { episodeId: id }, orderBy: { order: "asc" }, include: { lines: { orderBy: { order: "asc" } } } });
-  return NextResponse.json(segs.map((s) => ({ id: s.order + 1, dbId: s.id, title: s.title, durationSec: s.durationSec, status: s.status === "GENERATING" ? "generating" : s.status === "DONE" ? "done" : s.status === "FAILED" ? "failed" : "pending", videoUrl: s.videoUrl, lines: s.lines.map((l) => ({ id: l.id, durationSec: l.durationSec, tag: l.tag.toLowerCase(), character: l.characterName, direction: l.direction, shotType: l.shotType, text: l.text })) })));
-}
+// GET /api/episodes/:id/segments — danh sách segment + lines (filmstrip +
+// panel giữa của màn hình editor cấp đoạn).
+export const GET = withAuth(async (_req, { userId, params }) => {
+  const episode = await findOwnedEpisode(userId, params.id);
+  if (!episode) return apiError(404, "NOT_FOUND", "Không tìm thấy tập phim.");
 
-export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const b = await req.json().catch(() => ({}));
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy", 404);
-  const upd = await prisma.episode.update({ where: { id }, data: { ratio: b.ratio, resolution: b.resolution, videoModel: b.videoModel, subtitleMode: b.subtitleMode, stitchEnabled: b.stitchEnabled } });
-  return NextResponse.json(upd);
-}
+  const segments = await prisma.segment.findMany({
+    where: { episodeId: episode.id },
+    orderBy: { order: "asc" },
+    include: { lines: { orderBy: { order: "asc" } } },
+  });
+
+  return apiOk({
+    episode: {
+      id: episode.id,
+      title: episode.title,
+      summary: episode.summary,
+      ratio: episode.ratio,
+      resolution: episode.resolution,
+      videoModel: episode.videoModel,
+      subtitleMode: episode.subtitleMode,
+      stitchEnabled: episode.stitchEnabled,
+    },
+    segments,
+  });
+});

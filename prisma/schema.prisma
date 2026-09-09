@@ -1,3 +1,6 @@
+// FilmCraft AI — Prisma schema
+// Xem BACKEND_PROMPT.md để biết bối cảnh & quy cách dữ liệu đầy đủ.
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -6,6 +9,288 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// ---------------------------------------------------------------------------
+// Auth / User
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  name          String?
+  role          UserRole       @default(USER)
+  createdAt     DateTime       @default(now())
+  dramaProjects DramaProject[]
+  videoProjects VideoProject[]
+  assets        Asset[]
+  wallet        Wallet?
+  jobs          GenerationJob[]
+}
+
+// ---------------------------------------------------------------------------
+// Kịch bản phim (Drama) — Lớp 1: Tóm tắt dự án
+// ---------------------------------------------------------------------------
+
+model DramaProject {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  title         String
+  coverGradient String // giữ tương thích FE hiện tại (from-x to-y)
+  status        ProjectStatus @default(DRAFT)
+  summary       ProjectSummary?
+  characters    Character[]
+  episodes      Episode[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model ProjectSummary {
+  id             String       @id @default(cuid())
+  projectId      String       @unique
+  project        DramaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  episodeCount   Int
+  storyGenre     String
+  targetAudience String
+  coreHook       String
+  logline        String       @db.Text
+  fullSummary    String       @db.Text
+  visualStyle    String
+  updatedAt      DateTime     @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Lớp 2 — Tiểu sử nhân vật
+// ---------------------------------------------------------------------------
+
+model Character {
+  id                 String        @id @default(cuid())
+  projectId          String
+  project            DramaProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name               String
+  characterType      CharacterType @default(SUPPORTING)
+  visualDescription  String        @db.Text
+  coreTags           String[]
+  background         String        @db.Text
+  personality        String        @db.Text
+  referenceImageUrl  String?
+  voiceAssetId       String? // liên kết Asset(category: VOICE) đã gắn cho nhân vật
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Lớp 3 — Kịch bản từng tập: Episode -> Scene -> Shot / DialogueLine
+// ---------------------------------------------------------------------------
+
+model Episode {
+  id        String        @id @default(cuid())
+  projectId String
+  project   DramaProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  index     Int // thứ tự tập, 1..N
+  title     String
+  summary   String // 1 câu tóm tắt hiển thị ở sidebar
+  scriptRaw String        @db.Text // nguồn sự thật — markdown kịch bản
+  status    EpisodeStatus @default(DRAFT)
+  scenes    Scene[]
+  segments  Segment[]
+
+  // cài đặt cấp tập (kế thừa mặc định dự án nếu null)
+  ratio         String?
+  resolution    String?
+  videoModel    String?
+  subtitleMode  String? // "auto" | "post"
+  stitchEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, index])
+}
+
+model Scene {
+  id                String   @id @default(cuid())
+  episodeId         String
+  episode           Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  sceneNumber       Int // số cảnh trong tập (phần sau dấu "-")
+  timeOfDay         String? // "Sáng", "Đêm"...
+  interiorExterior  String? // "Nội" | "Ngoại"
+  location          String
+  subLocation       String?
+  charactersPresent String[]
+  shots             Shot[]
+  order             Int
+}
+
+model Shot {
+  id          String         @id @default(cuid())
+  sceneId     String
+  scene       Scene          @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  order       Int
+  shotSize    ShotSize
+  description String         @db.Text
+  dialogue    DialogueLine[]
+  imageUrl    String?
+  videoUrl    String?
+  durationSec Float?
+}
+
+model DialogueLine {
+  id            String @id @default(cuid())
+  shotId        String
+  shot          Shot   @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  characterName String
+  direction     String?
+  text          String @db.Text
+  voiceUrl      String?
+  order         Int
+}
+
+// ---------------------------------------------------------------------------
+// Lớp 4 — Segment editor (đoạn phim gửi sinh video) + Seedance pipeline
+// ---------------------------------------------------------------------------
+
+model Segment {
+  id           String          @id @default(cuid())
+  episodeId    String
+  episode      Episode         @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  order        Int
+  title        String // "Đoạn phim 01"
+  durationSec  Int // tổng thời lượng, <= 30
+  status       SegmentStatus   @default(PENDING)
+  lines        SegmentLine[]
+  videoUrl     String?
+  lastFrameUrl String? // ghi lại khi return_last_frame=true
+  jobs         GenerationJob[]
+}
+
+model SegmentLine {
+  id            String         @id @default(cuid())
+  segmentId     String
+  segment       Segment        @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  order         Int
+  tag           SegmentLineTag
+  durationSec   Int            @default(0)
+  characterName String?
+  direction     String?
+  shotType      String? // "Toàn cảnh" | "Trung cảnh" | "Cận cảnh" | "Đặc tả" ...
+  text          String         @db.Text
+}
+
+// ---------------------------------------------------------------------------
+// Video ngắn AI
+// ---------------------------------------------------------------------------
+
+model VideoProject {
+  id               String          @id @default(cuid())
+  userId           String
+  user             User            @relation(fields: [userId], references: [id])
+  title            String
+  status           VideoStatus     @default(DRAFT)
+  templateId       String
+  topic            String          @db.Text
+  durationRange    String // "1-3" | "3-5" | "5-8"
+  audience         String
+  visualStyleId    String
+  characterStyleId String
+  voiceId          String
+  ratio            String // "16:9" | "9:16"
+  scenes           VideoScene[]
+  jobs             GenerationJob[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+}
+
+model VideoScene {
+  id             String       @id @default(cuid())
+  videoProjectId String
+  videoProject   VideoProject @relation(fields: [videoProjectId], references: [id], onDelete: Cascade)
+  order          Int
+  title          String
+  description    String       @db.Text
+  startSec       Float
+  endSec         Float
+  imageUrl       String?
+  videoUrl       String?
+}
+
+// ---------------------------------------------------------------------------
+// Tài sản (Assets)
+// ---------------------------------------------------------------------------
+
+model Asset {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  projectId String? // null nếu là tài sản dùng chung / "Trung tâm cá nhân"
+  category  AssetCategory
+  name      String
+  imageUrl  String?
+  metadata  Json?
+  createdAt DateTime      @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Ví & thanh toán
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id           String        @id @default(cuid())
+  userId       String        @unique
+  user         User          @relation(fields: [userId], references: [id])
+  balance      Int           @default(0) // đơn vị: đồng, hoặc "token" quy đổi
+  heldAmount   Int           @default(0) // đang tạm giữ cho job chưa hoàn tất
+  transactions Transaction[]
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  walletId    String
+  wallet      Wallet   @relation(fields: [walletId], references: [id])
+  type        TxType
+  amount      Int // dương = cộng, âm = trừ
+  description String
+  jobId       String?
+  createdAt   DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Generation jobs (hàng đợi AI)
+// ---------------------------------------------------------------------------
+
+model GenerationJob {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id])
+  type           JobType
+  status         JobStatus     @default(QUEUED)
+  targetType     String // "Episode" | "Shot" | "VideoScene" | "Character" | "Segment" ...
+  targetId       String
+  estimatedCost  Int
+  actualCost     Int?
+  resultUrl      String?
+  error          String?
+  provider       String? // "seedance-2.5" | "seedance-1.5" | "mock" | ...
+  requestPayload Json? // snapshot request đa phương thức đã gửi
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  videoProjectId String?
+  videoProject   VideoProject? @relation(fields: [videoProjectId], references: [id])
+
+  segmentId String?
+  segment   Segment? @relation(fields: [segmentId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
 
 enum ProjectStatus {
   DRAFT
@@ -85,260 +370,4 @@ enum SegmentLineTag {
   BGM
   DIALOGUE
   VISUAL
-}
-
-model User {
-  id            String         @id @default(cuid())
-  email         String         @unique
-  passwordHash  String
-  name          String?
-  createdAt     DateTime       @default(now())
-  dramaProjects DramaProject[]
-  videoProjects VideoProject[]
-  assets        Asset[]
-  wallet        Wallet?
-  jobs          GenerationJob[]
-}
-
-model DramaProject {
-  id            String        @id @default(cuid())
-  userId        String
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title         String
-  coverGradient String        @default("from-indigo-400 to-slate-700")
-  status        ProjectStatus @default(DRAFT)
-  summary       ProjectSummary?
-  characters    Character[]
-  episodes      Episode[]
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-
-  @@index([userId, status])
-}
-
-model ProjectSummary {
-  id             String       @id @default(cuid())
-  projectId      String       @unique
-  project        DramaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  episodeCount   Int          @default(8)
-  storyGenre     String       @default("")
-  targetAudience String       @default("")
-  coreHook       String       @default("")
-  logline        String       @default("") @db.Text
-  fullSummary    String       @default("") @db.Text
-  visualStyle    String       @default("")
-  updatedAt      DateTime     @updatedAt
-}
-
-model Character {
-  id                String        @id @default(cuid())
-  projectId         String
-  project           DramaProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name              String
-  characterType     CharacterType @default(SUPPORTING)
-  visualDescription String        @default("") @db.Text
-  coreTags          String[]      @default([])
-  background        String        @default("") @db.Text
-  personality       String        @default("") @db.Text
-  referenceImageUrl String?
-  createdAt         DateTime      @default(now())
-
-  @@index([projectId])
-}
-
-model Episode {
-  id          String        @id @default(cuid())
-  projectId   String
-  project     DramaProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  index       Int
-  title       String
-  summary     String        @default("") @db.Text
-  scriptRaw   String        @default("") @db.Text
-  status      EpisodeStatus @default(DRAFT)
-  ratio       String        @default("9:16")
-  resolution  String        @default("720p")
-  videoModel  String        @default("Seedance 2.5")
-  subtitleMode String       @default("auto")
-  stitchEnabled Boolean     @default(false)
-  scenes      Scene[]
-  segments    Segment[]
-  updatedAt   DateTime      @updatedAt
-
-  @@unique([projectId, index])
-  @@index([projectId])
-}
-
-model Scene {
-  id                String   @id @default(cuid())
-  episodeId         String
-  episode           Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  sceneNumber       Int
-  timeOfDay         String?
-  interiorExterior  String?
-  location          String   @default("")
-  subLocation       String?
-  charactersPresent String[] @default([])
-  order             Int      @default(0)
-  shots             Shot[]
-
-  @@index([episodeId])
-}
-
-model Shot {
-  id          String   @id @default(cuid())
-  sceneId     String
-  scene       Scene    @relation(fields: [sceneId], references: [id], onDelete: Cascade)
-  order       Int      @default(0)
-  shotSize    ShotSize @default(MEDIUM)
-  description String   @default("") @db.Text
-  dialogue    DialogueLine[]
-  imageUrl    String?
-  videoUrl    String?
-  durationSec Float?
-
-  @@index([sceneId])
-}
-
-model DialogueLine {
-  id            String @id @default(cuid())
-  shotId        String
-  shot          Shot   @relation(fields: [shotId], references: [id], onDelete: Cascade)
-  characterName String
-  direction     String?
-  text          String @db.Text
-  voiceUrl      String?
-  order         Int    @default(0)
-
-  @@index([shotId])
-}
-
-model Segment {
-  id           String        @id @default(cuid())
-  episodeId    String
-  episode      Episode       @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  order        Int           @default(0)
-  title        String        @default("")
-  durationSec  Int           @default(0)
-  status       SegmentStatus @default(PENDING)
-  lines        SegmentLine[]
-  videoUrl     String?
-  lastFrameUrl String?
-  jobs         GenerationJob[]
-
-  @@index([episodeId])
-}
-
-model SegmentLine {
-  id            String         @id @default(cuid())
-  segmentId     String
-  segment       Segment        @relation(fields: [segmentId], references: [id], onDelete: Cascade)
-  order         Int            @default(0)
-  tag           SegmentLineTag @default(VISUAL)
-  durationSec   Int            @default(0)
-  characterName String?
-  direction     String?
-  shotType      String?
-  text          String         @db.Text
-
-  @@index([segmentId])
-}
-
-model VideoProject {
-  id               String      @id @default(cuid())
-  userId           String
-  user             User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title            String
-  status           VideoStatus @default(DRAFT)
-  templateId       String      @default("")
-  topic            String      @default("") @db.Text
-  durationRange    String      @default("1-3")
-  audience         String      @default("")
-  visualStyleId    String      @default("")
-  characterStyleId String      @default("")
-  voiceId          String      @default("")
-  ratio            String      @default("16:9")
-  subtitleMode     String      @default("auto")
-  videoModel       String      @default("seedance-2.5")
-  scenes           VideoScene[]
-  jobs             GenerationJob[]
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
-
-  @@index([userId])
-}
-
-model VideoScene {
-  id             String       @id @default(cuid())
-  videoProjectId String
-  videoProject   VideoProject @relation(fields: [videoProjectId], references: [id], onDelete: Cascade)
-  order          Int          @default(0)
-  title          String
-  description    String       @db.Text
-  startSec       Float        @default(0)
-  endSec         Float        @default(0)
-  imageUrl       String?
-  videoUrl       String?
-
-  @@index([videoProjectId])
-}
-
-model Asset {
-  id        String        @id @default(cuid())
-  userId    String
-  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  projectId String?
-  category  AssetCategory @default(CHARACTER)
-  name      String
-  imageUrl  String?
-  metadata  Json?
-  createdAt DateTime      @default(now())
-
-  @@index([userId, category])
-}
-
-model Wallet {
-  id           String        @id @default(cuid())
-  userId       String        @unique
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  balance      Int           @default(0)
-  heldAmount   Int           @default(0)
-  transactions Transaction[]
-}
-
-model Transaction {
-  id          String   @id @default(cuid())
-  walletId    String
-  wallet      Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  type        TxType
-  amount      Int
-  description String
-  jobId       String?
-  createdAt   DateTime @default(now())
-
-  @@index([walletId])
-}
-
-model GenerationJob {
-  id             String    @id @default(cuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type           JobType
-  status         JobStatus @default(QUEUED)
-  targetType     String
-  targetId       String
-  estimatedCost  Int       @default(0)
-  actualCost     Int?
-  resultUrl      String?
-  error          String?
-  provider       String?
-  requestPayload Json?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  videoProjectId String?
-  videoProject   VideoProject? @relation(fields: [videoProjectId], references: [id], onDelete: SetNull)
-  segmentId      String?
-  segment        Segment?  @relation(fields: [segmentId], references: [id], onDelete: SetNull)
-
-  @@index([userId, status])
-  @@index([targetType, targetId])
 }

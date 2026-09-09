@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api-client";
+import { topUpAmounts } from "@/lib/mockData";
+import { apiFetch } from "@/lib/apiClient";
 
 const paymentMethods = [
   { id: "card", name: "Thẻ / Ví điện tử", note: "Đề xuất" },
@@ -10,17 +11,37 @@ const paymentMethods = [
   { id: "invoice", name: "Chuyển khoản công ty", note: "Khách hàng doanh nghiệp" },
 ];
 
+type Wallet = { balance: number; heldAmount: number; available: number };
+
 export default function PricingPage() {
   const [method, setMethod] = useState("card");
-  const [amounts, setAmounts] = useState<number[]>([50000, 100000, 200000, 500000, 1000000, 2000000]);
-  const [amount, setAmount] = useState(100000);
-  const [wallet, setWallet] = useState<{ balance: number; heldAmount: number; available: number } | null>(null);
-  const [msg, setMsg] = useState("");
-  useEffect(() => { api<typeof wallet>("/api/wallet").then(setWallet).catch(() => {}); }, []);
+  const [amount, setAmount] = useState(topUpAmounts[1]);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [topupLoading, setTopupLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadWallet = () => {
+    apiFetch<Wallet>("/api/wallet")
+      .then(setWallet)
+      .catch((err) => setError(err instanceof Error ? err.message : "Không tải được ví."));
+  };
+
+  useEffect(loadWallet, []);
+
   const topup = async () => {
-    setMsg("");
-    try { await api("/api/wallet/topup", { method: "POST", body: JSON.stringify({ amount }) }); setWallet(await api<typeof wallet>("/api/wallet")); setMsg("Nạp thành công (demo)"); }
-    catch (e) { setMsg((e as Error).message); }
+    setTopupLoading(true);
+    setError(null);
+    try {
+      const updated = await apiFetch<Wallet>("/api/wallet/topup", {
+        method: "POST",
+        body: JSON.stringify({ amount, method }),
+      });
+      setWallet(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Nạp tiền thất bại.");
+    } finally {
+      setTopupLoading(false);
+    }
   };
 
   return (
@@ -43,19 +64,23 @@ export default function PricingPage() {
             <span>Số dư khả dụng</span>
             <button className="rounded-full bg-white/10 px-2 py-1">Lịch sử nạp tiền</button>
           </div>
-          <p className="text-3xl font-bold">₫{(wallet?.available ?? 0).toLocaleString("vi-VN")}</p>
+          <p className="text-3xl font-bold">
+            {wallet ? wallet.available.toLocaleString("vi-VN") : "…"}
+          </p>
           <div className="mt-4 flex justify-between text-xs text-gray-300">
             <div>
-              <p>Tổng số dư</p>
-              <p className="text-white">₫{(wallet?.balance ?? 0).toLocaleString("vi-VN")}</p>
+              <p>Số dư gốc</p>
+              <p className="text-white">{wallet ? wallet.balance.toLocaleString("vi-VN") : "…"}</p>
             </div>
             <div className="text-right">
               <p>Đang tạm giữ</p>
-              <p className="text-white">₫{(wallet?.heldAmount ?? 0).toLocaleString("vi-VN")}</p>
+              <p className="text-white">{wallet ? wallet.heldAmount.toLocaleString("vi-VN") : "…"}</p>
             </div>
           </div>
         </div>
       </div>
+
+      {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
 
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-bold">Phương thức thanh toán</h2>
@@ -82,7 +107,7 @@ export default function PricingPage() {
 
       <h2 className="mb-4 text-lg font-bold">Chọn số tiền nạp</h2>
       <div className="mb-8 grid grid-cols-3 gap-3 sm:grid-cols-6">
-        {amounts.map((a) => (
+        {topUpAmounts.map((a) => (
           <button
             key={a}
             onClick={() => setAmount(a)}
@@ -95,10 +120,13 @@ export default function PricingPage() {
         ))}
       </div>
 
-      <button onClick={topup} className="brand-btn mb-10 w-full max-w-xs rounded-full px-5 py-3 text-sm font-semibold sm:w-auto">
-        Nạp ₫{amount.toLocaleString("vi-VN")} (demo)
+      <button
+        onClick={topup}
+        disabled={topupLoading}
+        className="brand-btn mb-10 w-full max-w-xs rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-50 sm:w-auto"
+      >
+        {topupLoading ? "Đang nạp…" : `Nạp ₫${amount.toLocaleString("vi-VN")} (demo)`}
       </button>
-      {msg && <p className="mb-6 text-sm text-emerald-600">{msg}</p>}
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-xl border border-black/10 bg-white p-5">

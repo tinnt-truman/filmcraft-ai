@@ -1,27 +1,62 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
 
-export async function GET(req: Request) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
+// GET /api/drama — danh sách dự án của user (filter status, search — khớp
+// tabs ở app/drama/page.tsx: all/in_progress/completed/draft).
+export const GET = withAuth(async (req, { userId }) => {
   const { searchParams } = new URL(req.url);
   const status = searchParams.get("status");
-  const q = searchParams.get("q") ?? searchParams.get("search") ?? "";
-  const list = await prisma.dramaProject.findMany({
-    where: { userId: u.id, ...(status ? { status: status.toUpperCase() as "DRAFT" } : {}), ...(q ? { title: { contains: q, mode: "insensitive" } } : {}) },
+  const search = searchParams.get("search");
+
+  const projects = await prisma.dramaProject.findMany({
+    where: {
+      userId,
+      ...(status && status !== "all" ? { status: status.toUpperCase() as never } : {}),
+      ...(search ? { title: { contains: search, mode: "insensitive" } } : {}),
+    },
     include: { summary: true, _count: { select: { episodes: true, characters: true } } },
     orderBy: { updatedAt: "desc" },
   });
-  return NextResponse.json(list.map((p) => ({ id: p.id, title: p.title, cover: p.coverGradient, status: p.status === "IN_PROGRESS" ? "in_progress" : p.status === "COMPLETED" ? "completed" : "draft", synopsis: p.summary?.logline ?? "", style: p.summary?.visualStyle ?? "", episodeCount: p.summary?.episodeCount ?? p._count.episodes, updatedAt: p.updatedAt })));
-}
 
-export async function POST(req: Request) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { title, style } = await req.json().catch(() => ({}));
-  if (!title) return err("VALIDATION", "Thiếu title", 422);
-  const p = await prisma.dramaProject.create({ data: { userId: u.id, title, coverGradient: "from-indigo-400 to-slate-700" } });
-  await prisma.projectSummary.create({ data: { projectId: p.id, visualStyle: style ?? "", episodeCount: 8 } });
-  return NextResponse.json({ id: p.id, title: p.title }, { status: 201 });
-}
+  return apiOk({ projects });
+});
+
+const CreateDramaSchema = z.object({
+  title: z.string().min(1),
+  style: z.string().optional(),
+  coverGradient: z.string().optional(),
+});
+
+// POST /api/drama — tạo dự án mới (title, style ban đầu).
+export const POST = withAuth(async (req, { userId }) => {
+  const body = await req.json().catch(() => null);
+  const parsed = CreateDramaSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu tạo dự án không hợp lệ.", parsed.error.flatten());
+  }
+
+  const project = await prisma.dramaProject.create({
+    data: {
+      userId,
+      title: parsed.data.title,
+      coverGradient: parsed.data.coverGradient ?? "from-slate-400 to-slate-700",
+      status: "DRAFT",
+      summary: {
+        create: {
+          episodeCount: 0,
+          storyGenre: parsed.data.style ?? "",
+          targetAudience: "",
+          coreHook: "",
+          logline: "",
+          fullSummary: "",
+          visualStyle: parsed.data.style ?? "",
+        },
+      },
+    },
+    include: { summary: true },
+  });
+
+  return apiOk(project, 201);
+});

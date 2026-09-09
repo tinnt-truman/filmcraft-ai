@@ -3,56 +3,141 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { api } from "@/lib/api-client";
+import {
+  videoTemplates,
+  styleTemplates,
+  characterStyles,
+  voiceOptions,
+} from "@/lib/mockData";
+import { apiFetch, pollJob } from "@/lib/apiClient";
 
 const stepLabels = ["Chọn mẫu", "Nội dung đầu vào", "Cấu hình kiểu", "Bắt đầu tạo"];
 
+type VideoProject = {
+  id: string;
+  title: string;
+  templateId: string;
+  topic: string;
+  durationRange: string;
+  audience: string;
+  visualStyleId: string;
+  characterStyleId: string;
+  voiceId: string;
+  ratio: "16:9" | "9:16";
+  status: string;
+};
+
+type VideoScene = {
+  id: string;
+  order: number;
+  title: string;
+  description: string;
+  startSec: number;
+  endSec: number;
+};
+
 export default function VideoWizardPage() {
   const params = useParams<{ id: string }>();
-  const [config, setConfig] = useState<{ templates: { id: string; name: string; desc?: string }[]; styles: { id: string; name: string; ratio: string }[]; chars: { id: string; name: string; desc: string }[]; voices: { id: string; name: string; gender: string }[] } | null>(null);
+
+  const [project, setProject] = useState<VideoProject | null>(null);
+  const [scenes, setScenes] = useState<VideoScene[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const [step, setStep] = useState(0);
-  const [template, setTemplate] = useState("");
+  const [template, setTemplate] = useState(videoTemplates[0].id);
   const [topic, setTopic] = useState("");
   const [duration, setDuration] = useState("1-3");
   const [audience, setAudience] = useState("Học sinh trung học cơ sở");
-  const [style, setStyle] = useState("");
-  const [charStyle, setCharStyle] = useState("");
-  const [voice, setVoice] = useState("");
+  const [style, setStyle] = useState(styleTemplates[5].id);
+  const [charStyle, setCharStyle] = useState(characterStyles[0].id);
+  const [voice, setVoice] = useState(voiceOptions[1].id);
   const [ratio, setRatio] = useState<"16:9" | "9:16">("16:9");
+
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [done, setDone] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+
   useEffect(() => {
-    api<{ templates: { id: string; name: string; desc?: string }[]; styles: { id: string; name: string; ratio: string }[]; chars: { id: string; name: string; desc: string }[]; voices: { id: string; name: string; gender: string }[] }>("/api/config/video-templates").then((r) => {
-      setConfig(r as any);
-      const vt = (r as any).templates[0]; if (vt) setTemplate(vt.id);
-      const st = (r as any).styles[0]; if (st) setStyle(st.id);
-      const ct = (r as any).chars[0]; if (ct) setCharStyle(ct.id);
-      const vo = (r as any).voices[0]; if (vo) setVoice(vo.id);
-    }).catch(() => {}).finally(() => {});
-  }, []);
+    let cancelled = false;
+    apiFetch<VideoProject & { scenes: VideoScene[] }>(`/api/video-projects/${params.id}`)
+      .then((data) => {
+        if (cancelled) return;
+        setProject(data);
+        setTemplate(data.templateId);
+        setTopic(data.topic);
+        setDuration(data.durationRange);
+        setAudience(data.audience);
+        setStyle(data.visualStyleId);
+        setCharStyle(data.characterStyleId);
+        setVoice(data.voiceId);
+        setRatio(data.ratio);
+        setScenes(data.scenes ?? []);
+        if (data.scenes?.length) setDone(true);
+      })
+      .catch((err) => !cancelled && setLoadError(err instanceof Error ? err.message : "Không tải được dự án."));
+    return () => {
+      cancelled = true;
+    };
+  }, [params.id]);
 
-  const selectedStyle = config?.styles.find((s: { id: string }) => s.id === style);
-  const selectedVoice = config?.voices.find((v: { id: string }) => v.id === voice);
-  const selectedTemplate = config?.templates.find((t: { id: string }) => t.id === template);
-
-  const startGenerate = async () => {
-    setDone(false);
-    setProgress(0);
-    setGenerating(true);
+  const saveStep = async (patch: Partial<VideoProject>) => {
+    if (!project) return;
     try {
-      const { api } = await import("@/lib/api-client");
-      await api(`/api/video-projects/${params.id}`, { method: "PATCH", body: JSON.stringify({ templateId: template, topic, durationRange: duration, audience, visualStyleId: style, characterStyleId: charStyle, voiceId: voice, ratio }) });
-      const { jobId } = await api<{ jobId: string }>(`/api/video-projects/${params.id}/storyboard`, { method: "POST" });
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const j = await api<{ status: string }>(`/api/jobs/${jobId}`).catch(() => null);
-        if (j?.status === "succeeded" || j?.status === "failed") break;
-      }
-    } catch {}
+      await apiFetch(`/api/video-projects/${project.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    } catch {
+      // best-effort
+    }
   };
 
+  const goNext = async () => {
+    if (step === 0) await saveStep({ templateId: template });
+    if (step === 1) await saveStep({ topic, durationRange: duration, audience });
+    if (step === 2) await saveStep({ visualStyleId: style, characterStyleId: charStyle, voiceId: voice, ratio });
+    setStep((s) => Math.min(s + 1, 3));
+  };
+
+  const startGenerate = async () => {
+    if (!project) return;
+    setDone(false);
+    setProgress(10);
+    setGenerating(true);
+    setGenError(null);
+    try {
+      const { jobId } = await apiFetch<{ jobId: string }>(`/api/video-projects/${project.id}/storyboard`, {
+        method: "POST",
+      });
+      const job = await pollJob(jobId, { onTick: () => setProgress((p) => Math.min(p + 15, 90)) });
+      if (job.status === "FAILED") throw new Error(job.error ?? "Tạo bảng phân cảnh thất bại.");
+      const updated = await apiFetch<VideoProject & { scenes: VideoScene[] }>(`/api/video-projects/${project.id}`);
+      setScenes(updated.scenes ?? []);
+      setProgress(100);
+      setDone(true);
+    } catch (err) {
+      setGenError(err instanceof Error ? err.message : "Có lỗi khi tạo bảng phân cảnh.");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const selectedStyle = styleTemplates.find((s) => s.id === style)!;
+  const selectedVoice = voiceOptions.find((v) => v.id === voice)!;
+  const selectedTemplate = videoTemplates.find((t) => t.id === template)!;
   const showPreviewPanel = step >= 1;
+
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-7xl px-6 py-10">
+        <Link href="/video" className="text-sm text-gray-500 hover:text-black">
+          ← Quay lại nền tảng tạo nội dung
+        </Link>
+        <p className="mt-4 text-sm text-red-600">{loadError}</p>
+      </div>
+    );
+  }
+  if (!project) {
+    return <div className="mx-auto max-w-7xl px-6 py-10 text-sm text-gray-400">Đang tải…</div>;
+  }
 
   return (
     <div className="mx-auto max-w-7xl px-6 py-6">
@@ -69,9 +154,7 @@ export default function VideoWizardPage() {
           <button
             key={s}
             onClick={() => setStep(i)}
-            className={`flex items-center gap-2 ${
-              i === step ? "font-bold text-black" : "text-gray-400"
-            }`}
+            className={`flex items-center gap-2 ${i === step ? "font-bold text-black" : "text-gray-400"}`}
           >
             <span
               className={`flex h-5 w-5 items-center justify-center rounded-full text-[11px] ${
@@ -87,7 +170,7 @@ export default function VideoWizardPage() {
 
       <div className="flex gap-6">
         <div className="flex-1">
-          {step === 0 && <TemplateStep template={template} setTemplate={setTemplate} config={config} />}
+          {step === 0 && <TemplateStep template={template} setTemplate={setTemplate} />}
           {step === 1 && (
             <InputStep
               topic={topic}
@@ -106,7 +189,6 @@ export default function VideoWizardPage() {
               setCharStyle={setCharStyle}
               voice={voice}
               setVoice={setVoice}
-              config={config}
             />
           )}
           {step === 3 && (
@@ -114,16 +196,15 @@ export default function VideoWizardPage() {
               generating={generating}
               progress={progress}
               done={done}
+              error={genError}
+              scenes={scenes}
               onGenerate={startGenerate}
             />
           )}
 
           {step < 3 && (
             <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => setStep((s) => Math.min(s + 1, 3))}
-                className="brand-btn rounded-full px-5 py-2.5 text-sm font-semibold"
-              >
+              <button onClick={goNext} className="brand-btn rounded-full px-5 py-2.5 text-sm font-semibold">
                 {step === 2 ? "Tạo bảng phân cảnh →" : "Bước tiếp theo →"}
               </button>
             </div>
@@ -135,14 +216,12 @@ export default function VideoWizardPage() {
             <div className="sticky top-20 rounded-xl border border-black/10 bg-white p-4">
               <p className="mb-3 text-sm font-bold">Xem trước trực tiếp</p>
               <div className={`mb-3 h-40 w-full rounded-lg bg-gradient-to-br ${previewGradient(style)}`} />
-              <p className="mb-3 text-xs text-gray-600">{selectedTemplate?.desc}</p>
-              <p className="mb-2 text-xs font-bold text-gray-500">
-                Tổng quan về cấu hình hiện tại
-              </p>
+              <p className="mb-3 text-xs text-gray-600">{selectedTemplate.desc}</p>
+              <p className="mb-2 text-xs font-bold text-gray-500">Tổng quan về cấu hình hiện tại</p>
               <dl className="space-y-1.5 text-xs">
-                <Row label="Mẫu" value={selectedTemplate?.name} />
-                <Row label="Phong cách" value={selectedStyle?.name} />
-                <Row label="Lồng tiếng" value={selectedVoice?.name} />
+                <Row label="Mẫu" value={selectedTemplate.name} />
+                <Row label="Phong cách" value={selectedStyle.name} />
+                <Row label="Lồng tiếng" value={selectedVoice.name} />
                 <Row
                   label="Tỷ lệ"
                   value={
@@ -150,7 +229,10 @@ export default function VideoWizardPage() {
                       {(["16:9", "9:16"] as const).map((r) => (
                         <button
                           key={r}
-                          onClick={() => setRatio(r)}
+                          onClick={() => {
+                            setRatio(r);
+                            saveStep({ ratio: r });
+                          }}
                           className={`rounded px-1.5 py-0.5 text-[11px] ${
                             ratio === r ? "bg-black text-white" : "bg-black/5 text-gray-600"
                           }`}
@@ -161,7 +243,7 @@ export default function VideoWizardPage() {
                     </div>
                   }
                 />
-                <Row label="Phim hoàn chỉnh" value="Video AI (demo)" />
+                <Row label="Phim hoàn chỉnh" value="Video AI" />
               </dl>
             </div>
           </aside>
@@ -192,15 +274,7 @@ function previewGradient(styleId: string) {
   return map[styleId] ?? "from-gray-200 to-gray-400";
 }
 
-function TemplateStep({
-  template,
-  setTemplate,
-  config,
-}: {
-  template: string;
-  setTemplate: (v: string) => void;
-  config: { templates: { id: string; name: string; desc?: string }[] } | null;
-}) {
+function TemplateStep({ template, setTemplate }: { template: string; setTemplate: (v: string) => void }) {
   return (
     <div>
       <h2 className="mb-1 text-lg font-bold">Chọn một kịch bản mẫu để bắt đầu</h2>
@@ -208,7 +282,7 @@ function TemplateStep({
         Mẫu chỉ gợi ý cấu trúc kịch bản — bạn có thể chỉnh sửa toàn bộ nội dung ở bước sau.
       </p>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {(config?.templates ?? []).map((t) => (
+        {videoTemplates.map((t) => (
           <button
             key={t.id}
             onClick={() => setTemplate(t.id)}
@@ -246,9 +320,7 @@ function InputStep({
   return (
     <div className="max-w-2xl">
       <h2 className="mb-1 text-lg font-bold">Nội dung đầu vào</h2>
-      <p className="mb-5 text-sm text-gray-500">
-        Mô tả chủ đề hoặc dán bài viết bạn muốn chuyển thành video.
-      </p>
+      <p className="mb-5 text-sm text-gray-500">Mô tả chủ đề hoặc dán bài viết bạn muốn chuyển thành video.</p>
 
       <label className="mb-1 block text-xs font-semibold text-gray-600">Chủ đề / ý tưởng</label>
       <textarea
@@ -297,7 +369,6 @@ function StyleStep({
   setCharStyle,
   voice,
   setVoice,
-  config,
 }: {
   style: string;
   setStyle: (v: string) => void;
@@ -305,13 +376,12 @@ function StyleStep({
   setCharStyle: (v: string) => void;
   voice: string;
   setVoice: (v: string) => void;
-  config: { styles: { id: string; name: string; ratio: string }[]; chars: { id: string; name: string; desc: string }[]; voices: { id: string; name: string; gender: string }[] } | null;
 }) {
   return (
     <div>
       <h2 className="mb-4 text-lg font-bold">Phong cách hình ảnh</h2>
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {(config?.styles ?? []).map((s) => (
+        {styleTemplates.map((s) => (
           <button
             key={s.id}
             onClick={() => setStyle(s.id)}
@@ -330,7 +400,7 @@ function StyleStep({
 
       <h3 className="mb-3 text-sm font-bold">Cài đặt nhân vật</h3>
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {(config?.chars ?? []).map((c) => (
+        {characterStyles.map((c) => (
           <button
             key={c.id}
             onClick={() => setCharStyle(c.id)}
@@ -347,7 +417,7 @@ function StyleStep({
 
       <h3 className="mb-3 text-sm font-bold">Âm sắc lồng tiếng</h3>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {(config?.voices ?? []).map((v) => (
+        {voiceOptions.map((v) => (
           <div
             key={v.id}
             className={`flex items-center justify-between rounded-xl border p-3 ${
@@ -357,9 +427,6 @@ function StyleStep({
             <button onClick={() => setVoice(v.id)} className="text-left">
               <p className="text-xs font-semibold">{v.name}</p>
               <p className="text-[11px] text-gray-500">{v.gender}</p>
-            </button>
-            <button className="rounded-full border border-black/10 px-2 py-1 text-[11px] hover:bg-black/5">
-              ▸ Nghe
             </button>
           </div>
         ))}
@@ -372,44 +439,39 @@ function GenerateStep({
   generating,
   progress,
   done,
+  error,
+  scenes,
   onGenerate,
 }: {
   generating: boolean;
   progress: number;
   done: boolean;
+  error: string | null;
+  scenes: VideoScene[];
   onGenerate: () => void;
 }) {
   if (done) {
     return (
       <div>
         <h2 className="mb-1 text-lg font-bold">Bảng phân cảnh đã sẵn sàng</h2>
-        <p className="mb-5 text-sm text-gray-500">
-          Xem lại từng cảnh trước khi xuất video hoàn chỉnh (demo — không tạo video thật).
-        </p>
+        <p className="mb-5 text-sm text-gray-500">Xem lại từng cảnh trước khi xuất video hoàn chỉnh.</p>
         <div className="space-y-3">
-          {[
-            { id: 1, title: "Cảnh mở đầu", desc: "Toàn cảnh chủ đề, câu hỏi dẫn dắt người xem.", duration: "0:00–0:08" },
-            { id: 2, title: "Bối cảnh", desc: "Giải thích bối cảnh / định nghĩa cơ bản.", duration: "0:08–0:20" },
-            { id: 3, title: "Diễn biến chính", desc: "Đi sâu vào nội dung chính, minh hoạ bằng hình ảnh động.", duration: "0:20–0:45" },
-            { id: 4, title: "Cao trào", desc: "Điểm nhấn thú vị nhất hoặc bất ngờ nhất của chủ đề.", duration: "0:45–0:55" },
-            { id: 5, title: "Kết luận", desc: "Tóm tắt ngắn gọn và lời kêu gọi hành động.", duration: "0:55–1:05" },
-          ].map((sc) => (
+          {scenes.map((sc) => (
             <div key={sc.id} className="flex items-center gap-4 rounded-xl border border-black/10 bg-white p-3">
               <div className="h-16 w-24 shrink-0 rounded-lg bg-gray-100" />
               <div className="flex-1">
                 <p className="text-sm font-semibold">
-                  Cảnh {sc.id} · {sc.title}
+                  Cảnh {sc.order} · {sc.title}
                 </p>
-                <p className="text-xs text-gray-500">{sc.desc}</p>
+                <p className="text-xs text-gray-500">{sc.description}</p>
               </div>
-              <span className="text-xs text-gray-400">{sc.duration}</span>
+              <span className="text-xs text-gray-400">
+                {Math.floor(sc.startSec)}s–{Math.floor(sc.endSec)}s
+              </span>
             </div>
           ))}
         </div>
         <div className="mt-6 flex gap-3">
-          <button className="brand-btn rounded-full px-5 py-2.5 text-sm font-semibold">
-            Xuất video hoàn chỉnh
-          </button>
           <button
             onClick={onGenerate}
             className="rounded-full border border-black/15 px-5 py-2.5 text-sm font-semibold hover:bg-black/5"
@@ -429,6 +491,8 @@ function GenerateStep({
         đầu tạo hình ảnh và thêm lời thoại.
       </p>
 
+      {error && <p className="mb-3 text-xs text-red-600">{error}</p>}
+
       {!generating ? (
         <button onClick={onGenerate} className="brand-btn rounded-full px-6 py-3 text-sm font-semibold">
           Tạo bảng phân cảnh →
@@ -436,10 +500,7 @@ function GenerateStep({
       ) : (
         <div>
           <div className="mb-2 h-2 w-full overflow-hidden rounded-full bg-black/10">
-            <div
-              className="h-full bg-black transition-all"
-              style={{ width: `${progress}%` }}
-            />
+            <div className="h-full bg-black transition-all" style={{ width: `${progress}%` }} />
           </div>
           <p className="text-xs text-gray-500">Đang dựng bảng phân cảnh… {progress}%</p>
         </div>

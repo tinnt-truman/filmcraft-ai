@@ -1,26 +1,58 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
-import { llmGenerate, buildScriptPrompt } from "@/lib/ai";
-import { holdForJob } from "@/lib/wallet";
-import { completeJobAsync } from "@/lib/jobs";
+import { apiError, apiOk } from "@/lib/apiError";
+import { withAuth } from "@/lib/routeAuth";
+import { prisma } from "@/lib/prisma";
+import { findOwnedEpisode } from "@/lib/ownership";
+import { createGenerationJob, settleJob } from "@/lib/jobs";
+import { getLlmProvider } from "@/lib/providers/llm";
 
-export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } }, include: { project: { include: { summary: true, characters: true } } } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy", 404);
-  try {
-    const cost = await holdForJob(u.id, "SCRIPT");
-    const text = await llmGenerate(buildScriptPrompt({ title: e.project.title, genre: e.project.summary?.storyGenre ?? "", logline: e.project.summary?.logline ?? "", characters: e.project.characters.map((c) => c.name).join(", "), episodeIndex: e.index, episodeSummary: e.summary }), "Viết kịch bản tiếng Việt đúng khuôn mẫu Cảnh/△/thoại");
-    await prisma.episode.update({ where: { id }, data: { scriptRaw: text } });
-    const job = await prisma.generationJob.create({ data: { userId: u.id, type: "SCRIPT", status: "SUCCEEDED", targetType: "Episode", targetId: id, estimatedCost: cost, actualCost: cost } });
-    const w = await prisma.wallet.findUnique({ where: { userId: u.id } });
-    if (w) { const { settleJob } = await import("@/lib/wallet"); await settleJob(w.id, job.id, cost, cost); }
-    void completeJobAsync;
-    return NextResponse.json({ scriptRaw: text, jobId: job.id });
-  } catch (e2: unknown) {
-    return err((e2 as { code?: string }).code ?? "ERR", (e2 as Error).message, (e2 as { status?: number }).status ?? 500);
-  }
-}
+// Few-shot: khuôn mẫu kịch bản, xem BACKEND_PROMPT.md mục "Lớp 3".
+const SCRIPT_FORMAT_SYSTEM_PROMPT = `Bạn là biên kịch AI cho nền tảng FilmCraft AI. Sinh kịch bản 1 tập phim
+đúng khuôn mẫu markdown sau (không thêm giải thích ngoài khuôn mẫu):
+
+### Cảnh {tập}-{số cảnh}
+{Thời gian} {Nội/Ngoại} {Địa điểm}・{Địa điểm phụ}
+Nhân vật xuất hiện: {tên 1}, {tên 2}
+△ {Toàn cảnh xa|Toàn cảnh|Cảnh trung|Cận cảnh|Đặc tả}: {mô tả hình ảnh chi tiết}
+{Tên nhân vật} ({chú thích cảm xúc/hành động}): {lời thoại}
+
+Có thể nhiều block "### Cảnh" trong 1 tập.`;
+
+// POST /api/episodes/:id/regenerate-script — nút "Tái tạo" (gọi LLM sinh
+// lại toàn bộ scriptRaw theo khuôn mẫu).
+export const POST = withAuth(async (req, { userId, params }) => {
+  const episode = await findOwnedEpisode(userId, params.id);
+  if (!episode) return apiError(404, "NOT_FOUND", "Không tìm thấy tập phim.");
+
+  const body = await req.json().catch(() => ({}));
+  const instructions: string | undefined = body?.instructions;
+
+  const job = await createGenerationJob({
+    userId,
+    type: "SCRIPT",
+    targetType: "Episode",
+    targetId: episode.id,
+    run: async (jobId) => {
+      try {
+        const llm = getLlmProvider();
+        const prompt = [
+          `Dự án: ${episode.project.title}.`,
+          episode.project.summary ? `Bối cảnh chung: ${episode.project.summary.fullSummary}` : "",
+          `Sinh kịch bản cho ${episode.title} (tập số ${episode.index}): ${episode.summary}`,
+          instructions ? `Yêu cầu thêm: ${instructions}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const scriptRaw = await llm.generateText({ systemPrompt: SCRIPT_FORMAT_SYSTEM_PROMPT, prompt });
+        await prisma.episode.update({
+          where: { id: episode.id },
+          data: { scriptRaw, status: "DRAFT" },
+        });
+        await settleJob(jobId, { status: "SUCCEEDED" });
+      } catch (err) {
+        await settleJob(jobId, { status: "FAILED", error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  });
+
+  return apiOk({ jobId: job.id, status: job.status }, 202);
+});

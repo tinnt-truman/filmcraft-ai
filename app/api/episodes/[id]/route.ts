@@ -1,33 +1,26 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
+import { findOwnedEpisode } from "@/lib/ownership";
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } }, include: { scenes: { include: { shots: { include: { dialogue: true } } } } } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy tập", 404);
-  return NextResponse.json(e);
-}
+const UpdateEpisodeSchema = z.object({
+  title: z.string().min(1).optional(),
+  summary: z.string().optional(),
+  scriptRaw: z.string().optional(), // nút "Chỉnh sửa văn bản chính"
+});
 
-export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const b = await req.json().catch(() => ({}));
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy", 404);
-  const data: Record<string, unknown> = {
-    title: b.title,
-    summary: b.summary,
-    scriptRaw: b.scriptRaw,
-    ratio: b.ratio,
-    resolution: b.resolution,
-    videoModel: b.videoModel,
-    subtitleMode: b.subtitleMode,
-    stitchEnabled: b.stitchEnabled,
-  };
-  const upd = await prisma.episode.update({ where: { id }, data });
-  return NextResponse.json(upd);
-}
+// PATCH /api/episodes/:id — sửa scriptRaw tay (hoặc title/summary).
+export const PATCH = withAuth(async (req, { userId, params }) => {
+  const episode = await findOwnedEpisode(userId, params.id);
+  if (!episode) return apiError(404, "NOT_FOUND", "Không tìm thấy tập phim.");
+
+  const body = await req.json().catch(() => null);
+  const parsed = UpdateEpisodeSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu tập phim không hợp lệ.", parsed.error.flatten());
+  }
+
+  const updated = await prisma.episode.update({ where: { id: params.id }, data: parsed.data });
+  return apiOk(updated);
+});

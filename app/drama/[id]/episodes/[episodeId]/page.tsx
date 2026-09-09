@@ -1,123 +1,172 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import {
-  dramaProjects,
-  episodes,
-  getSegmentsForEpisode,
   subtitleModel,
-  shotAiModel,
   videoModels,
   aspectRatios,
   resolutions,
   subtitleModes,
   cameraStitchInfo,
   episodeHelpTabs,
-  type Segment,
-  type SegmentLine,
 } from "@/lib/mockData";
-import { api } from "@/lib/api-client";
-type AssetCategory = "Vai trò" | "Bối cảnh" | "Đạo cụ" | "Âm sắc";
+import { apiFetch, pollJob } from "@/lib/apiClient";
+
+type LineTag = "SUBTITLE_CONFIG" | "BGM" | "DIALOGUE" | "VISUAL";
+type SegmentLine = {
+  id: string;
+  order: number;
+  tag: LineTag;
+  durationSec: number;
+  characterName: string | null;
+  direction: string | null;
+  shotType: string | null;
+  text: string;
+};
+type Segment = {
+  id: string;
+  order: number;
+  title: string;
+  durationSec: number;
+  status: "PENDING" | "GENERATING" | "DONE" | "FAILED";
+  videoUrl: string | null;
+  lines: SegmentLine[];
+};
+type EpisodeMeta = {
+  id: string;
+  title: string;
+  summary: string;
+  ratio: string | null;
+  resolution: string | null;
+  videoModel: string | null;
+  subtitleMode: string | null;
+  stitchEnabled: boolean;
+};
 
 export default function EpisodeEditorPage() {
   const params = useParams<{ id: string; episodeId: string }>();
-  const episodeId = Number(params.episodeId) || 1;
 
-  const project = useMemo(
-    () => dramaProjects.find((p) => p.id === params.id) ?? dramaProjects[0],
-    [params.id]
-  );
-  const episode = useMemo(
-    () => episodes.find((e) => e.id === episodeId) ?? episodes[0],
-    [episodeId]
-  );
+  const [episode, setEpisode] = useState<EpisodeMeta | null>(null);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [segments, setSegments] = useState<Segment[]>(() => getSegmentsForEpisode(episodeId));
-  const [activeId, setActiveId] = useState(segments[0]?.id ?? 1);
-  const [segError, setSegError] = useState("");
-  useEffect(() => { api<AssetCategory[]>("/api/config/asset-categories").then(setAssetCategories).catch(() => {}); }, []);
-  useEffect(() => {
-    let alive = true;
-    api<{ dbId: string }[]>(`/api/drama/${params.id}/episodes`).then((list) => {
-      const found = list.find((e) => (e as unknown as { id: number }).id === episodeId);
-      if (found?.dbId && alive) {
-        api<Segment[]>(`/api/episodes/${found.dbId}/segments`).then((segs) => {
-          if (segs.length && alive) { setSegments(segs); setActiveId(segs[0].id); }
-        }).catch(() => {});
-      }
-    }).catch(() => {});
-    return () => { alive = false; };
-  }, [params.id, episodeId]);
-  const [leftTab, setLeftTab] = useState<"episode" | "all">("episode");
-  const [assetTab, setAssetTab] = useState<AssetCategory>("Vai trò");
-  const [assetCategories, setAssetCategories] = useState<AssetCategory[]>(["Vai trò", "Bối cảnh", "Đạo cụ", "Âm sắc"]);
   const [aspectRatio, setAspectRatio] = useState(aspectRatios[0]);
   const [resolution, setResolution] = useState(resolutions[0]);
   const [videoModel, setVideoModel] = useState(videoModels[0]);
   const [subtitleModeId, setSubtitleModeId] = useState<(typeof subtitleModes)[number]["id"]>("auto");
   const [stitchEnabled, setStitchEnabled] = useState(false);
-  const [openMenu, setOpenMenu] = useState<
-    "ratio" | "model" | "subtitle" | "stitch" | "help" | null
-  >(null);
+  const [openMenu, setOpenMenu] = useState<"ratio" | "model" | "subtitle" | "stitch" | "help" | null>(null);
   const [helpTab, setHelpTab] = useState<"transfer" | "script" | "recommend">("transfer");
-  const [showNewCharacter, setShowNewCharacter] = useState(false);
-  const [newCharacterName, setNewCharacterName] = useState("");
+  const [regeneratingAll, setRegeneratingAll] = useState(false);
 
-  const active = segments.find((s) => s.id === activeId) ?? segments[0];
+  const load = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ episode: EpisodeMeta; segments: Segment[] }>(
+        `/api/episodes/${params.episodeId}/segments`
+      );
+      setEpisode(data.episode);
+      setSegments(data.segments);
+      setActiveId((prev) => prev ?? data.segments[0]?.id ?? null);
+      if (data.episode.ratio) setAspectRatio(data.episode.ratio);
+      if (data.episode.resolution) setResolution(data.episode.resolution);
+      if (data.episode.videoModel) setVideoModel(data.episode.videoModel);
+      if (data.episode.subtitleMode) setSubtitleModeId(data.episode.subtitleMode as "auto" | "post");
+      setStitchEnabled(data.episode.stitchEnabled);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Không tải được dữ liệu tập phim.");
+    }
+  }, [params.episodeId]);
+
+  useEffect(() => {
+    // `load` chỉ gọi setState *sau* khi await xong request — an toàn, không
+    // gây cascading render đồng bộ — nhưng eslint-plugin-react-hooks không
+    // theo dõi qua ranh giới hàm async nên báo nhầm ở đây.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, [load]);
+
+  const saveSettings = async (patch: Record<string, unknown>) => {
+    try {
+      await apiFetch(`/api/episodes/${params.episodeId}/settings`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      // best-effort — UI vẫn phản ánh lựa chọn cục bộ dù lưu lỗi
+    }
+  };
+
+  const active = useMemo(() => segments.find((s) => s.id === activeId) ?? segments[0], [segments, activeId]);
 
   const counts = {
-    done: segments.filter((s) => s.status === "done").length,
-    generating: segments.filter((s) => s.status === "generating").length,
-    failed: segments.filter((s) => s.status === "failed").length,
+    done: segments.filter((s) => s.status === "DONE").length,
+    generating: segments.filter((s) => s.status === "GENERATING").length,
+    failed: segments.filter((s) => s.status === "FAILED").length,
     total: segments.length,
   };
 
-  const pollJob = async (jobId: string, segId: number) => {
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const j = await api<{ status: string }>(`/api/jobs/${jobId}`);
-        if (j.status === "succeeded") { setSegments((prev) => prev.map((s) => (s.id === segId ? { ...s, status: "done" } : s))); return; }
-        if (j.status === "failed") { setSegments((prev) => prev.map((s) => (s.id === segId ? { ...s, status: "failed" } : s))); return; }
-      } catch {}
+  const generate = async (id: string) => {
+    setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, status: "GENERATING" } : s)));
+    try {
+      const { jobId } = await apiFetch<{ jobId: string }>(`/api/segments/${id}/generate`, { method: "POST" });
+      const job = await pollJob(jobId);
+      setSegments((prev) =>
+        prev.map((s) =>
+          s.id === id
+            ? { ...s, status: job.status === "SUCCEEDED" ? "DONE" : "FAILED", videoUrl: job.resultUrl }
+            : s
+        )
+      );
+    } catch (err) {
+      setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, status: "FAILED" } : s)));
+      if (typeof window !== "undefined") window.alert(err instanceof Error ? err.message : "Tạo video thất bại.");
     }
   };
-  const generate = async (id: number) => {
-    const seg = segments.find((s) => s.id === id) as (Segment & { dbId?: string }) | undefined;
-    setSegError("");
-    setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, status: "generating" } : s)));
+
+  const regenerateAll = async () => {
+    setRegeneratingAll(true);
     try {
-      if (seg?.dbId && seg.dbId.length > 10) {
-        const { jobId } = await api<{ jobId: string }>(`/api/segments/${seg.dbId}/generate`, { method: "POST" });
-        pollJob(jobId, id);
-        return;
-      }
-    } catch (e) { setSegError((e as Error).message); }
-    setTimeout(() => {
-      setSegments((prev) => prev.map((s) => (s.id === id ? { ...s, status: "done" } : s)));
-    }, 1800);
+      await apiFetch(`/api/episodes/${params.episodeId}/regenerate-all`, { method: "POST" });
+      await load();
+    } catch (err) {
+      if (typeof window !== "undefined") window.alert(err instanceof Error ? err.message : "Không thể tái lập kịch bản.");
+    } finally {
+      setRegeneratingAll(false);
+    }
   };
+
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-[1400px] px-4 py-10">
+        <Link href={`/drama/${params.id}`} className="text-sm text-gray-500 hover:text-black">
+          ← Quay lại
+        </Link>
+        <p className="mt-4 text-sm text-red-600">{loadError}</p>
+      </div>
+    );
+  }
+  if (!episode) {
+    return <div className="mx-auto max-w-[1400px] px-4 py-10 text-sm text-gray-400">Đang tải…</div>;
+  }
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-4">
       {/* top bar */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-black/10 pb-3">
         <div className="flex min-w-0 items-center gap-3">
-          <Link href={`/drama/${project.id}`} className="text-gray-500 hover:text-black">
+          <Link href={`/drama/${params.id}`} className="text-gray-500 hover:text-black">
             ←
           </Link>
-          <h1 className="line-clamp-1 max-w-xs text-sm font-bold sm:max-w-md">
-            {episode.summary}
-          </h1>
+          <h1 className="line-clamp-1 max-w-xs text-sm font-bold sm:max-w-md">{episode.summary}</h1>
         </div>
 
         <div className="relative flex flex-wrap items-center gap-2 text-xs">
           {openMenu && openMenu !== "help" && (
             <div className="fixed inset-0 z-10" onClick={() => setOpenMenu(null)} />
           )}
-          {/* ratio + resolution */}
           <div className="relative">
             <button
               onClick={() => setOpenMenu(openMenu === "ratio" ? null : "ratio")}
@@ -128,16 +177,15 @@ export default function EpisodeEditorPage() {
             {openMenu === "ratio" && (
               <div className="absolute right-0 top-full z-20 mt-1.5 w-72 rounded-xl border border-black/10 bg-white p-4 text-left shadow-lg">
                 <p className="mb-2 text-xs font-bold">Tỷ lệ khung hình & Độ sắc nét</p>
-                <p className="mb-3 text-[11px] leading-relaxed text-gray-400">
-                  Chỉ dùng cho phân cảnh của tập này; nếu không đặt riêng sẽ kế thừa mặc định của dự
-                  án. Vui lòng tạo lại video cho mỗi đoạn sau khi thay đổi.
-                </p>
                 <p className="mb-1.5 text-[11px] font-semibold text-gray-500">Tỷ lệ khung hình</p>
                 <div className="mb-3 flex gap-1.5">
                   {aspectRatios.map((r) => (
                     <button
                       key={r}
-                      onClick={() => setAspectRatio(r)}
+                      onClick={() => {
+                        setAspectRatio(r);
+                        saveSettings({ ratio: r });
+                      }}
                       className={`rounded-full px-3 py-1 text-[11px] font-semibold ${
                         aspectRatio === r ? "bg-brand text-black" : "border border-black/10 text-gray-600"
                       }`}
@@ -151,7 +199,10 @@ export default function EpisodeEditorPage() {
                   {resolutions.map((r) => (
                     <button
                       key={r}
-                      onClick={() => setResolution(r)}
+                      onClick={() => {
+                        setResolution(r);
+                        saveSettings({ resolution: r });
+                      }}
                       className={`rounded-full px-3 py-1 text-[11px] font-semibold ${
                         resolution === r ? "bg-brand text-black" : "border border-black/10 text-gray-600"
                       }`}
@@ -164,11 +215,6 @@ export default function EpisodeEditorPage() {
             )}
           </div>
 
-          <span className="rounded-full border border-black/10 bg-white px-3 py-1.5 font-medium text-gray-600">
-            {project.style.split(",")[0]}
-          </span>
-
-          {/* subtitle mode */}
           <div className="relative">
             <button
               onClick={() => setOpenMenu(openMenu === "subtitle" ? null : "subtitle")}
@@ -185,7 +231,10 @@ export default function EpisodeEditorPage() {
                       <input
                         type="radio"
                         checked={subtitleModeId === m.id}
-                        onChange={() => setSubtitleModeId(m.id)}
+                        onChange={() => {
+                          setSubtitleModeId(m.id);
+                          saveSettings({ subtitleMode: m.id });
+                        }}
                         className="mt-0.5"
                       />
                       <span>
@@ -199,7 +248,6 @@ export default function EpisodeEditorPage() {
             )}
           </div>
 
-          {/* video model */}
           <div className="relative">
             <button
               onClick={() => setOpenMenu(openMenu === "model" ? null : "model")}
@@ -209,14 +257,12 @@ export default function EpisodeEditorPage() {
             </button>
             {openMenu === "model" && (
               <div className="absolute right-0 top-full z-20 mt-1.5 w-44 rounded-xl border border-black/10 bg-white p-2 text-left shadow-lg">
-                <p className="mb-1 px-2 pt-1 text-[10px] font-semibold uppercase text-gray-400">
-                  Mô hình video
-                </p>
                 {videoModels.map((m) => (
                   <button
                     key={m}
                     onClick={() => {
                       setVideoModel(m);
+                      saveSettings({ videoModel: m });
                       setOpenMenu(null);
                     }}
                     className={`block w-full rounded-lg px-2 py-1.5 text-left text-[12px] font-medium ${
@@ -230,7 +276,6 @@ export default function EpisodeEditorPage() {
             )}
           </div>
 
-          {/* camera stitch toggle */}
           <div className="relative">
             <button
               onClick={() => setOpenMenu(openMenu === "stitch" ? null : "stitch")}
@@ -245,7 +290,10 @@ export default function EpisodeEditorPage() {
                   <input
                     type="checkbox"
                     checked={stitchEnabled}
-                    onChange={(e) => setStitchEnabled(e.target.checked)}
+                    onChange={(e) => {
+                      setStitchEnabled(e.target.checked);
+                      saveSettings({ stitchEnabled: e.target.checked });
+                    }}
                     className="mt-0.5"
                   />
                   <span className="text-[12px] font-medium">{cameraStitchInfo.optionLabel}</span>
@@ -255,7 +303,6 @@ export default function EpisodeEditorPage() {
             )}
           </div>
 
-          {/* help */}
           <div className="relative">
             <button
               onClick={() => setOpenMenu(openMenu === "help" ? null : "help")}
@@ -272,17 +319,12 @@ export default function EpisodeEditorPage() {
                       ✕
                     </button>
                   </div>
-                  <p className="mb-3 text-[11px] leading-relaxed text-gray-400">
-                    {episodeHelpTabs.transfer.intro}
-                  </p>
                   <div className="mb-3 flex gap-1 rounded-full bg-black/5 p-1 text-[11px] font-semibold">
                     {(Object.keys(episodeHelpTabs) as (keyof typeof episodeHelpTabs)[]).map((k) => (
                       <button
                         key={k}
                         onClick={() => setHelpTab(k)}
-                        className={`flex-1 rounded-full py-1.5 ${
-                          helpTab === k ? "bg-white shadow-sm" : "text-gray-500"
-                        }`}
+                        className={`flex-1 rounded-full py-1.5 ${helpTab === k ? "bg-white shadow-sm" : "text-gray-500"}`}
                       >
                         {episodeHelpTabs[k].label}
                       </button>
@@ -305,112 +347,21 @@ export default function EpisodeEditorPage() {
             )}
           </div>
 
-          <button className="rounded-full bg-black px-3 py-1.5 font-semibold text-white">
-            Tái lập kịch bản bằng AI
+          <button
+            onClick={regenerateAll}
+            disabled={regeneratingAll}
+            className="rounded-full bg-black px-3 py-1.5 font-semibold text-white disabled:opacity-50"
+          >
+            {regeneratingAll ? "Đang xếp hàng…" : "Tái lập kịch bản bằng AI"}
           </button>
         </div>
       </div>
 
       <p className="mb-4 text-xs text-gray-500">
-        Đã hoàn thành {counts.done}/{counts.total} · Đang tiến hành {counts.generating} · Thất bại{" "}
-        {counts.failed}
-        {segError && <span className="ml-2 text-red-500">{segError}</span>}
+        Đã hoàn thành {counts.done}/{counts.total} · Đang tiến hành {counts.generating} · Thất bại {counts.failed}
       </p>
 
       <div className="flex gap-5">
-        {/* left sidebar */}
-        <aside className="hidden w-64 shrink-0 lg:block">
-          <div className="mb-4 flex gap-1 rounded-full bg-black/5 p-1 text-xs font-semibold">
-            <button
-              onClick={() => setLeftTab("episode")}
-              className={`flex-1 rounded-full py-1.5 ${leftTab === "episode" ? "bg-white shadow-sm" : "text-gray-500"}`}
-            >
-              Tập này
-            </button>
-            <button
-              onClick={() => setLeftTab("all")}
-              className={`flex-1 rounded-full py-1.5 ${leftTab === "all" ? "bg-white shadow-sm" : "text-gray-500"}`}
-            >
-              Trọn bộ
-            </button>
-          </div>
-
-          <div className="mb-3 flex gap-1.5">
-            {assetCategories.slice(0, 3).map((c) => (
-              <button
-                key={c}
-                onClick={() => setAssetTab(c)}
-                className={
-                  assetTab === c
-                    ? "rounded-full bg-black px-3 py-1 text-[11px] font-semibold text-white"
-                    : "rounded-full border border-black/10 bg-white px-3 py-1 text-[11px] font-medium text-gray-600"
-                }
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-
-          <div className="mb-4 flex gap-2">
-            <button
-              onClick={() => setShowNewCharacter(true)}
-              className="brand-btn flex-1 rounded-full px-3 py-1.5 text-xs font-semibold"
-            >
-              Tạo nhân vật mới
-            </button>
-            <button className="flex-1 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-medium hover:bg-black/5">
-              Nhập khẩu
-            </button>
-          </div>
-
-          {showNewCharacter && (
-            <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4">
-              <div className="w-full max-w-sm rounded-2xl bg-white p-5">
-                <h3 className="mb-1 text-sm font-bold">Tạo nhân vật mới</h3>
-                <p className="mb-3 text-[11px] leading-relaxed text-gray-400">
-                  Nhập tên nhân vật, sau khi tạo sẽ được chèn vào phân cảnh hiện tại, và bạn có thể
-                  tiếp tục tải lên / tạo ảnh đại diện.
-                </p>
-                <input
-                  autoFocus
-                  value={newCharacterName}
-                  onChange={(e) => setNewCharacterName(e.target.value)}
-                  placeholder="Tên nhân vật"
-                  className="mb-4 w-full rounded-lg border border-black/10 px-3 py-2 text-sm outline-none focus:border-black/30"
-                />
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={() => {
-                      setShowNewCharacter(false);
-                      setNewCharacterName("");
-                    }}
-                    className="rounded-full border border-black/10 px-4 py-1.5 text-xs font-semibold hover:bg-black/5"
-                  >
-                    Hủy
-                  </button>
-                  <button
-                    disabled={!newCharacterName.trim()}
-                    onClick={() => {
-                      setShowNewCharacter(false);
-                      setNewCharacterName("");
-                    }}
-                    className="brand-btn rounded-full px-4 py-1.5 text-xs font-semibold disabled:opacity-40"
-                  >
-                    Tạo
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <p className="rounded-lg bg-black/5 p-3 text-[11px] leading-relaxed text-gray-500">
-            {leftTab === "episode"
-              ? 'Tập này hiện chưa có tài nguyên tham chiếu nào. Thêm bằng nút "Tạo nhân vật mới" ở trên, hoặc chuyển sang "Trọn bộ" để xem tài nguyên của cả dự án.'
-              : "Đang hiển thị tài nguyên dùng chung của toàn bộ dự án (nhân vật, bối cảnh, đạo cụ đã tạo ở Thư viện tài sản)."}
-          </p>
-        </aside>
-
-        {/* middle: segment editor */}
         <div className="min-w-0 flex-1">
           {active && (
             <div className="rounded-xl border border-black/10 bg-white p-4">
@@ -418,24 +369,7 @@ export default function EpisodeEditorPage() {
                 <h2 className="text-sm font-bold">
                   {active.title} · {active.durationSec} giây
                 </h2>
-                <label className="flex items-center gap-1.5 text-xs text-gray-500">
-                  Khoảng thời gian
-                  <input
-                    type="number"
-                    value={active.durationSec}
-                    readOnly
-                    className="w-14 rounded border border-black/10 px-2 py-1 text-center"
-                  />
-                  s
-                </label>
               </div>
-              <p className="mb-3 text-[11px] text-gray-400">
-                Nội dung liên quan đến đoạn này; gõ @ để tham chiếu tài sản hoặc chèn thẻ thời
-                lượng.
-              </p>
-              <p className="mb-4 rounded-lg bg-black/5 px-3 py-2 text-[11px] text-gray-500">
-                Không có tài sản liên quan nào. Nhấp vào thẻ bên trái hoặc nhập @asset:id
-              </p>
 
               <div className="space-y-3">
                 {active.lines.map((l) => (
@@ -443,72 +377,51 @@ export default function EpisodeEditorPage() {
                 ))}
               </div>
 
-              <p className="mt-4 text-[11px] leading-relaxed text-gray-400">
-                Hiện tại, tính năng ghép khung hình cuối chưa được bật: các đoạn sẽ được tạo độc
-                lập và đồng thời, phù hợp với sản xuất hàng loạt nhanh chóng.
-              </p>
-
               <div className="mt-4 flex gap-2">
-                <button className="rounded-full border border-black/10 px-4 py-2 text-xs font-semibold hover:bg-black/5">
-                  biên tập
-                </button>
                 <button
                   onClick={() => generate(active.id)}
-                  disabled={active.status === "generating"}
+                  disabled={active.status === "GENERATING"}
                   className="brand-btn rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
                 >
-                  {active.status === "generating" ? "Đang tạo…" : "phát ra"}
+                  {active.status === "GENERATING" ? "Đang tạo…" : "phát ra"}
                 </button>
               </div>
             </div>
           )}
         </div>
 
-        {/* right: preview */}
         <aside className="hidden w-80 shrink-0 xl:block">
           <div className="rounded-xl border border-black/10 bg-white p-4">
             <div className="mb-3 flex gap-4 text-xs font-semibold text-gray-400">
               <button className="text-black">Xem trước</button>
-              <button>vải bố</button>
-              <span className="ml-auto flex items-center gap-1 text-gray-300">
-                <button disabled className="cursor-not-allowed">
-                  ⭳ Tải xuống phim đầy đủ
-                </button>
-              </span>
+              <a
+                href={`/api/episodes/${params.episodeId}/subtitles.srt`}
+                className="ml-auto text-gray-500 hover:text-black"
+              >
+                Xuất SRT
+              </a>
             </div>
             <div className="flex aspect-[9/16] w-full items-center justify-center rounded-lg bg-gray-100 text-center text-xs text-gray-400">
-              {active?.status === "done" ? (
-                <div className="p-4">
-                  <div className="mb-2 text-2xl">▶</div>
-                  Video đã sẵn sàng (demo)
-                </div>
-              ) : active?.status === "generating" ? (
+              {active?.status === "DONE" ? (
+                active.videoUrl ? (
+                  <video src={active.videoUrl} controls className="h-full w-full rounded-lg object-cover" />
+                ) : (
+                  <div className="p-4">
+                    <div className="mb-2 text-2xl">▶</div>
+                    Đã xử lý xong (provider mock — chưa có file video thật)
+                  </div>
+                )
+              ) : active?.status === "GENERATING" ? (
                 "Đang dựng video…"
               ) : (
                 "Video đang chờ tạo"
               )}
             </div>
-            <p className="mt-2 text-center text-[11px] text-gray-400">00:00 / 05:39</p>
-            <button className="mt-3 w-full rounded-full border border-black/10 py-2 text-xs font-medium hover:bg-black/5">
-              Mở khung vẽ kịch bản
-            </button>
-
-            <div className="mt-5 border-t border-black/10 pt-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-bold">Bảng phụ đề</p>
-                  <p className="text-[11px] text-gray-400">{subtitleModel} · 82 mục</p>
-                </div>
-                <button className="rounded-full border border-black/10 px-3 py-1 text-[11px] font-medium hover:bg-black/5">
-                  Xuất SRT
-                </button>
-              </div>
-            </div>
+            <p className="mt-2 text-center text-[11px] text-gray-400">{subtitleModel}</p>
           </div>
         </aside>
       </div>
 
-      {/* bottom filmstrip */}
       <div className="mt-5 flex gap-3 overflow-x-auto pb-2">
         {segments.map((s) => (
           <button
@@ -519,7 +432,7 @@ export default function EpisodeEditorPage() {
             }`}
           >
             <div className="flex h-16 w-full items-center justify-center rounded bg-gray-100 text-lg text-gray-300">
-              {s.status === "done" ? "✓" : s.status === "generating" ? "…" : "+"}
+              {s.status === "DONE" ? "✓" : s.status === "GENERATING" ? "…" : "+"}
             </div>
             <p className="text-[11px] font-semibold">
               {s.title} · {s.durationSec} giây
@@ -538,18 +451,18 @@ function LineRow({ line: l }: { line: SegmentLine }) {
     </span>
   );
 
-  if (l.tag === "subtitle_config" || l.tag === "bgm") {
+  if (l.tag === "SUBTITLE_CONFIG" || l.tag === "BGM") {
     return (
       <div className="flex items-start gap-2 text-[11px] text-gray-500">
         <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium">
-          【{l.tag === "subtitle_config" ? "Phụ đề" : "BGM"}】
+          【{l.tag === "SUBTITLE_CONFIG" ? "Phụ đề" : "BGM"}】
         </span>
         <span>{l.text}</span>
       </div>
     );
   }
 
-  if (l.tag === "dialogue") {
+  if (l.tag === "DIALOGUE") {
     return (
       <div className="flex items-start gap-2 text-sm">
         {badge}
@@ -557,14 +470,13 @@ function LineRow({ line: l }: { line: SegmentLine }) {
           <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
             Đối thoại · chậm rõ · đồng bộ phụ đề
           </span>{" "}
-          <span className="font-semibold">{l.character}</span>
+          <span className="font-semibold">{l.characterName}</span>
           {l.direction && <span className="text-gray-400"> ({l.direction})</span>}: {l.text}
         </p>
       </div>
     );
   }
 
-  // visual
   return (
     <div className="flex items-start gap-2 text-sm">
       {badge}

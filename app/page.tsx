@@ -1,9 +1,5 @@
-"use client";
-
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { aiTools as fallbackTools } from "@/lib/mockData";
-import { api } from "@/lib/api-client";
+import { aiTools } from "@/lib/mockData";
 
 const capabilities = [
   {
@@ -40,13 +36,11 @@ const audiences = [
 ];
 
 export default function HomePage() {
-  const [tools, setTools] = useState<typeof fallbackTools>(fallbackTools);
-  useEffect(() => { api<typeof fallbackTools>("/api/config/tools").then(setTools).catch(() => {}); }, []);
   return (
     <div>
       <section className="mx-auto max-w-7xl px-6 pt-16 pb-10">
         <p className="text-xs font-bold tracking-widest text-gray-500">
-          FILMCRAFT AI · BẢN DEMO GIAO DIỆN
+          FILMCRAFT AI · BẢN DEMO LOCAL
         </p>
         <div className="mt-4 grid gap-10 md:grid-cols-2 md:items-center">
           <div>
@@ -132,7 +126,7 @@ export default function HomePage() {
           </Link>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {tools.map((t: { id: string; name: string; desc: string }) => (
+          {aiTools.map((t) => (
             <div key={t.id} className="rounded-xl border border-black/10 bg-white p-5">
               <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-brand/40">
                 ✦
@@ -184,8 +178,9 @@ export default function HomePage() {
           <div>
             <p className="text-sm font-bold text-black">FILMCRAFT AI</p>
             <p className="mt-1">
-              Bản demo giao diện, mô phỏng workflow — không kết nối mô hình AI
-              thật, không thu thập dữ liệu.
+              Bản demo chạy local, phi thương mại — backend thật (tài khoản,
+              ví token, hàng đợi job), AI provider mặc định chạy ở chế độ mô
+              phỏng offline, có thể cắm API key thật khi cần.
             </p>
           </div>
           <div className="flex gap-4">

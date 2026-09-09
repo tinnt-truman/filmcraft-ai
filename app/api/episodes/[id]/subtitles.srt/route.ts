@@ -1,23 +1,57 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { requireUserId, AuthError } from "@/lib/auth";
+import { apiError } from "@/lib/apiError";
 
-function fmt(t: number) {
-  const m = Math.floor(t / 60); const s = Math.floor(t % 60);
-  return `00:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},000`;
+function formatSrtTime(totalSec: number): string {
+  const ms = Math.round((totalSec % 1) * 1000);
+  const s = Math.floor(totalSec) % 60;
+  const m = Math.floor(totalSec / 60) % 60;
+  const h = Math.floor(totalSec / 3600);
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const segs = await prisma.segment.findMany({ where: { episodeId: id, episode: { project: { userId: u.id } } }, orderBy: { order: "asc" }, include: { lines: { orderBy: { order: "asc" } } } });
-  let t = 0; let n = 0; const out: string[] = [];
-  for (const s of segs) for (const l of s.lines) {
-    if (l.tag !== "DIALOGUE") continue;
-    n += 1; const d = l.durationSec || 4;
-    out.push(`${n}\n${fmt(t)} --> ${fmt(t + d)}\n${l.characterName ?? ""}: ${l.text}\n`);
-    t += d;
+// GET /api/episodes/:id/subtitles.srt — xuất file phụ đề, ghép từ các
+// SegmentLine loại "dialogue" của toàn bộ segment trong tập (nút "Xuất SRT").
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (err) {
+    if (err instanceof AuthError) return apiError(401, "UNAUTHORIZED", "Chưa đăng nhập.");
+    throw err;
   }
-  return new NextResponse(out.join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": "attachment; filename=subtitles.srt" } });
+
+  const { id } = await ctx.params;
+  const episode = await prisma.episode.findFirst({
+    where: { id, project: { userId } },
+    include: { segments: { orderBy: { order: "asc" }, include: { lines: { orderBy: { order: "asc" } } } } },
+  });
+  if (!episode) return apiError(404, "NOT_FOUND", "Không tìm thấy tập phim.");
+
+  let cursor = 0;
+  let index = 1;
+  const blocks: string[] = [];
+
+  for (const segment of episode.segments) {
+    for (const line of segment.lines) {
+      if (line.tag !== "VISUAL" && line.tag !== "DIALOGUE") continue;
+      const start = cursor;
+      cursor += line.durationSec || 0;
+      if (line.tag !== "DIALOGUE") continue;
+      const who = line.characterName ? `${line.characterName}: ` : "";
+      blocks.push(`${index}\n${formatSrtTime(start)} --> ${formatSrtTime(cursor)}\n${who}${line.text}\n`);
+      index += 1;
+    }
+  }
+
+  const srt = blocks.join("\n");
+  return new NextResponse(srt, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-subrip; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${episode.title.replace(/[^a-zA-Z0-9-_]+/g, "_")}.srt"`,
+    },
+  });
 }

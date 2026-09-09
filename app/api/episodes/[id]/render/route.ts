@@ -1,23 +1,34 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
-import { holdForJob } from "@/lib/wallet";
-import { completeJobAsync } from "@/lib/jobs";
+import { apiError, apiOk } from "@/lib/apiError";
+import { withAuth } from "@/lib/routeAuth";
+import { prisma } from "@/lib/prisma";
+import { findOwnedEpisode } from "@/lib/ownership";
+import { regenerateAllSegments } from "@/lib/episodeJobs";
 
-export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const e = await prisma.episode.findFirst({ where: { id, project: { userId: u.id } }, include: { segments: true } });
-  if (!e) return err("NOT_FOUND", "Không tìm thấy", 404);
-  if (e.segments.some((s) => s.status === "GENERATING")) return err("BUSY", "Còn segment đang tạo, thử lại sau", 409);
-  try {
-    const cost = await holdForJob(u.id, "SHOT_VIDEO", 0);
-    const job = await prisma.generationJob.create({ data: { userId: u.id, type: "SHOT_VIDEO", status: "QUEUED", targetType: "Episode", targetId: id, estimatedCost: cost } });
-    await prisma.episode.update({ where: { id }, data: { status: "RENDERED" } });
-    completeJobAsync(job.id);
-    return NextResponse.json({ jobId: job.id }, { status: 201 });
-  } catch (e2: unknown) {
-    return err((e2 as { code?: string }).code ?? "ERR", (e2 as Error).message, (e2 as { status?: number }).status ?? 500);
+// POST /api/episodes/:id/render — render video tập phim đầy đủ (enqueue
+// sinh video cho toàn bộ segment chưa DONE của tập; xem lib/episodeJobs.ts
+// cho cơ chế hàng đợi + nối khung hình).
+export const POST = withAuth(async (_req, { userId, params }) => {
+  const episode = await findOwnedEpisode(userId, params.id);
+  if (!episode) return apiError(404, "NOT_FOUND", "Không tìm thấy tập phim.");
+
+  const segmentCount = await prisma.segment.count({ where: { episodeId: episode.id } });
+  if (segmentCount === 0) {
+    return apiError(
+      422,
+      "NO_SEGMENTS",
+      "Tập phim chưa có đoạn (segment) nào — chạy AI phân cảnh / thêm đoạn trước khi render."
+    );
   }
-}
+
+  const { jobIds } = await regenerateAllSegments(userId, episode.id);
+
+  if (episode.stitchEnabled) {
+    // Chế độ tuần tự: regenerateAllSegments() đã await từng đoạn xong mới
+    // sang đoạn kế -> tới đây toàn bộ segment đã settle.
+    await prisma.episode.update({ where: { id: episode.id }, data: { status: "RENDERED" } });
+  }
+  // Chế độ đồng thời (mặc định): job vẫn đang chạy nền — FE poll từng
+  // jobId hoặc GET /api/episodes/:id/segments để biết tiến độ.
+
+  return apiOk({ jobIds }, 202);
+});

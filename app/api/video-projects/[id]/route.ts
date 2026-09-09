@@ -1,25 +1,44 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
+import { findOwnedVideoProject } from "@/lib/ownership";
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const v = await prisma.videoProject.findFirst({ where: { id, userId: u.id }, include: { scenes: { orderBy: { order: "asc" } } } });
-  if (!v) return err("NOT_FOUND", "Không tìm thấy", 404);
-  return NextResponse.json(v);
-}
+// GET /api/video-projects/:id
+export const GET = withAuth(async (_req, { userId, params }) => {
+  const project = await prisma.videoProject.findFirst({
+    where: { id: params.id, userId },
+    include: { scenes: { orderBy: { order: "asc" } } },
+  });
+  if (!project) return apiError(404, "NOT_FOUND", "Không tìm thấy dự án video.");
+  return apiOk(project);
+});
 
-export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const b = await req.json().catch(() => ({}));
-  const v = await prisma.videoProject.findFirst({ where: { id, userId: u.id } });
-  if (!v) return err("NOT_FOUND", "Không tìm thấy", 404);
-  const data: Record<string, unknown> = { title: b.title, templateId: b.templateId, topic: b.topic, durationRange: b.durationRange, audience: b.audience, visualStyleId: b.visualStyleId, characterStyleId: b.characterStyleId, voiceId: b.voiceId, ratio: b.ratio };
-  if (b.status !== undefined) data.status = b.status?.toUpperCase();
-  const upd = await prisma.videoProject.update({ where: { id }, data });
-  return NextResponse.json(upd);
-}
+const UpdateVideoProjectSchema = z.object({
+  title: z.string().min(1).optional(),
+  templateId: z.string().optional(),
+  topic: z.string().optional(),
+  durationRange: z.string().optional(),
+  audience: z.string().optional(),
+  visualStyleId: z.string().optional(),
+  characterStyleId: z.string().optional(),
+  voiceId: z.string().optional(),
+  ratio: z.enum(["16:9", "9:16"]).optional(),
+  status: z.enum(["DRAFT", "GENERATING", "COMPLETED", "PUBLISHED"]).optional(),
+});
+
+// PATCH /api/video-projects/:id — lưu từng bước wizard (template -> input ->
+// style).
+export const PATCH = withAuth(async (req, { userId, params }) => {
+  const project = await findOwnedVideoProject(userId, params.id);
+  if (!project) return apiError(404, "NOT_FOUND", "Không tìm thấy dự án video.");
+
+  const body = await req.json().catch(() => null);
+  const parsed = UpdateVideoProjectSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu không hợp lệ.", parsed.error.flatten());
+  }
+
+  const updated = await prisma.videoProject.update({ where: { id: params.id }, data: parsed.data });
+  return apiOk(updated);
+});

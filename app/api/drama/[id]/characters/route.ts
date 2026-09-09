@@ -1,23 +1,39 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
 
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const p = await prisma.dramaProject.findFirst({ where: { id, userId: u.id } });
-  if (!p) return err("NOT_FOUND", "Không tìm thấy", 404);
-  const b = await req.json().catch(() => ({}));
-  if (!b.name) return err("VALIDATION", "Thiếu name", 422);
-  const c = await prisma.character.create({ data: { projectId: id, name: b.name, characterType: b.characterType ?? "SUPPORTING", visualDescription: b.visualDescription ?? "", coreTags: b.coreTags ?? [], background: b.background ?? "", personality: b.personality ?? "" } });
-  return NextResponse.json(c, { status: 201 });
-}
+const CreateCharacterSchema = z.object({
+  name: z.string().min(1),
+  characterType: z.enum(["PROTAGONIST", "DEUTERAGONIST", "ANTAGONIST", "SUPPORTING", "GROUP"]).optional(),
+  visualDescription: z.string().optional(),
+  coreTags: z.array(z.string()).optional(),
+  background: z.string().optional(),
+  personality: z.string().optional(),
+});
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { id } = await params;
-  const list = await prisma.character.findMany({ where: { projectId: id, project: { userId: u.id } } });
-  return NextResponse.json(list);
-}
+// POST /api/drama/:id/characters — thêm nhân vật (form "Nhân vật mới").
+export const POST = withAuth(async (req, { userId, params }) => {
+  const project = await prisma.dramaProject.findFirst({ where: { id: params.id, userId } });
+  if (!project) return apiError(404, "NOT_FOUND", "Không tìm thấy dự án.");
+
+  const body = await req.json().catch(() => null);
+  const parsed = CreateCharacterSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu nhân vật không hợp lệ.", parsed.error.flatten());
+  }
+
+  const character = await prisma.character.create({
+    data: {
+      projectId: project.id,
+      name: parsed.data.name,
+      characterType: parsed.data.characterType ?? "SUPPORTING",
+      visualDescription: parsed.data.visualDescription ?? "",
+      coreTags: parsed.data.coreTags ?? [],
+      background: parsed.data.background ?? "",
+      personality: parsed.data.personality ?? "",
+    },
+  });
+
+  return apiOk(character, 201);
+});

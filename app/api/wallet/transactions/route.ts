@@ -1,24 +1,19 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
-import { getWallet } from "@/lib/wallet";
-import { topUpAmounts } from "@/lib/mockData";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiOk } from "@/lib/apiError";
 
-export async function GET() {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const w = await getWallet(u.id);
-  const tx = await prisma.transaction.findMany({ where: { walletId: w.id }, orderBy: { createdAt: "desc" }, take: 50 });
-  return NextResponse.json(tx);
-}
+// GET /api/wallet/transactions — lịch sử nạp/trừ.
+export const GET = withAuth(async (req, { userId }) => {
+  const { searchParams } = new URL(req.url);
+  const limit = Math.min(Number(searchParams.get("limit")) || 50, 200);
 
-export async function POST(req: Request) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  const { amount } = await req.json().catch(() => ({}));
-  if (!amount || !topUpAmounts.includes(amount)) return err("VALIDATION", "Mệnh giá không hợp lệ", 422);
-  const w = await getWallet(u.id);
-  await prisma.wallet.update({ where: { id: w.id }, data: { balance: { increment: amount } } });
-  await prisma.transaction.create({ data: { walletId: w.id, type: "TOPUP", amount, description: `Nạp ${amount}đ (demo, chưa qua cổng thật)` } });
-  return NextResponse.json({ ok: true, amount });
-}
+  const wallet = await prisma.wallet.findUnique({ where: { userId } });
+  if (!wallet) return apiOk({ transactions: [] });
+
+  const transactions = await prisma.transaction.findMany({
+    where: { walletId: wallet.id },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+  return apiOk({ transactions });
+});

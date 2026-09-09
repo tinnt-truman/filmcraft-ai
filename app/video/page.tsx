@@ -2,9 +2,16 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { videoProjects as fallback } from "@/lib/mockData";
-import { api } from "@/lib/api-client";
-type VP = { id: string; title: string; status: string; template: string; ratio: string; updatedAt: string };
+import { apiFetch } from "@/lib/apiClient";
+
+type VideoProject = {
+  id: string;
+  title: string;
+  status: "DRAFT" | "GENERATING" | "COMPLETED" | "PUBLISHED";
+  templateId: string;
+  ratio: string;
+  updatedAt: string;
+};
 
 const tabs = [
   { id: "all", label: "Tất cả" },
@@ -15,23 +22,34 @@ const tabs = [
 ] as const;
 
 const statusLabel: Record<string, string> = {
-  draft: "Bản nháp",
-  generating: "Đang tạo",
-  completed: "Hoàn thành",
-  published: "Đã phát hành",
+  DRAFT: "Bản nháp",
+  GENERATING: "Đang tạo",
+  COMPLETED: "Hoàn thành",
+  PUBLISHED: "Đã phát hành",
 };
 
 export default function VideoListPage() {
   const [tab, setTab] = useState<(typeof tabs)[number]["id"]>("all");
-  const [items, setItems] = useState<VP[]>(fallback as unknown as VP[]);
-  useEffect(() => { api<VP[]>("/api/video-projects").then(setItems).catch(() => {}); }, []);
-  const projects = items.filter((p) => tab === "all" || p.status === tab);
+  const [projects, setProjects] = useState<VideoProject[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<{ projects: VideoProject[] }>("/api/video-projects")
+      .then((d) => !cancelled && setProjects(d.projects))
+      .catch((err) => !cancelled && setError(err instanceof Error ? err.message : "Không tải được danh sách."));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filtered = (projects ?? []).filter((p) => tab === "all" || p.status === tab.toUpperCase());
 
   const stats = [
-    { label: "Tổng số tác phẩm", value: items.length },
-    { label: "Đang tạo", value: items.filter((p) => p.status === "generating").length, sub: "Hiện không có nhiệm vụ nào." },
-    { label: "Hoàn thành", value: items.filter((p) => p.status === "completed").length },
-    { label: "Thời lượng tháng này", value: "—", sub: "Số liệu thống kê sẽ sớm được công bố." },
+    { label: "Tổng số tác phẩm", value: projects?.length ?? 0 },
+    { label: "Đang tạo", value: (projects ?? []).filter((p) => p.status === "GENERATING").length },
+    { label: "Hoàn thành", value: (projects ?? []).filter((p) => p.status === "COMPLETED").length },
+    { label: "Thời lượng tháng này", value: "—" },
   ];
 
   return (
@@ -44,10 +62,7 @@ export default function VideoListPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Link
-            href="/video/336"
-            className="brand-btn rounded-full px-4 py-2 text-sm font-semibold"
-          >
+          <Link href="/video/336" className="brand-btn rounded-full px-4 py-2 text-sm font-semibold">
             + Phổ biến khoa học mới
           </Link>
           <Link
@@ -64,7 +79,6 @@ export default function VideoListPage() {
           <div key={s.label} className="rounded-xl border border-black/10 bg-white p-4">
             <p className="text-xs font-medium text-gray-500">{s.label}</p>
             <p className="mt-1 text-2xl font-bold">{s.value}</p>
-            {s.sub && <p className="mt-1 text-[11px] text-emerald-600">{s.sub}</p>}
           </div>
         ))}
       </div>
@@ -85,14 +99,12 @@ export default function VideoListPage() {
             </button>
           ))}
         </div>
-        <input
-          placeholder="Tìm kiếm tên dự án"
-          className="w-56 rounded-full border border-black/10 bg-white px-4 py-1.5 text-sm outline-none focus:border-black/30"
-        />
       </div>
 
+      {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+
       <div className="overflow-hidden rounded-xl border border-black/10 bg-white">
-        {projects.map((p, i) => (
+        {filtered.map((p, i) => (
           <div
             key={p.id}
             className={`flex flex-wrap items-center justify-between gap-3 px-5 py-4 ${
@@ -106,11 +118,8 @@ export default function VideoListPage() {
               <div>
                 <p className="text-sm font-semibold">{p.title}</p>
                 <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
-                  <span className="rounded-full bg-black/5 px-2 py-0.5 font-medium">
-                    {statusLabel[p.status]}
-                  </span>
-                  <span>{p.template}</span>
-                  <span>· {p.updatedAt}</span>
+                  <span className="rounded-full bg-black/5 px-2 py-0.5 font-medium">{statusLabel[p.status]}</span>
+                  <span>· {new Date(p.updatedAt).toLocaleString("vi-VN")}</span>
                 </div>
               </div>
             </div>
@@ -119,15 +128,13 @@ export default function VideoListPage() {
               <Link href={`/video/${p.id}`} className="font-semibold hover:underline">
                 Tiếp tục chỉnh sửa
               </Link>
-              <button className="text-gray-500 hover:text-black">Xem trước</button>
-              <button className="text-gray-500 hover:text-black">tải xuống</button>
-              <button className="text-gray-500 hover:text-black">bản sao</button>
             </div>
           </div>
         ))}
-        {projects.length === 0 && (
+        {projects && filtered.length === 0 && (
           <p className="p-8 text-center text-sm text-gray-400">Chưa có dự án nào.</p>
         )}
+        {!projects && !error && <p className="p-8 text-center text-sm text-gray-400">Đang tải…</p>}
       </div>
     </div>
   );

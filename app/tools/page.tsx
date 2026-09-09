@@ -1,13 +1,7 @@
-"use client";
-
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { aiTools as fallbackTools } from "@/lib/mockData";
-import { api } from "@/lib/api-client";
+import { aiTools } from "@/lib/mockData";
 
 export default function ToolsPage() {
-  const [tools, setTools] = useState<typeof fallbackTools>(fallbackTools);
-  useEffect(() => { api<typeof fallbackTools>("/api/config/tools").then(setTools).catch(() => {}); }, []);
   return (
     <div className="mx-auto max-w-7xl px-6 py-8">
       <h1 className="text-2xl font-bold">Công cụ soạn thảo AI</h1>
@@ -16,7 +10,7 @@ export default function ToolsPage() {
       </p>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {tools.map((t: { id: string; name: string; desc: string }) => (
+        {aiTools.map((t) => (
           <Link
             key={t.id}
             href={`/tools/${t.id}`}

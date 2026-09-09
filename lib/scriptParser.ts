@@ -1,76 +1,217 @@
-export type ParsedShot = { shotSize: string; description: string; dialogues: { characterName: string; direction?: string; text: string }[] };
-export type ParsedScene = { sceneNumber: number; timeOfDay?: string; interiorExterior?: string; location: string; subLocation?: string; charactersPresent: string[]; shots: ParsedShot[] };
+// lib/scriptParser.ts
+//
+// Parse `Episode.scriptRaw` (khối text kịch bản markdown do LLM sinh ra,
+// hoặc user tự sửa tay) thành cây Scene[] -> Shot[] -> DialogueLine[] để
+// lưu vào DB và hiển thị storyboard.
+//
+// Khuôn mẫu (xem BACKEND_PROMPT.md, mục "Lớp 3"):
+//
+//   ### Cảnh {tập}-{số cảnh}
+//   {Thời gian} {Nội/Ngoại} {Địa điểm}・{Địa điểm phụ}
+//   Nhân vật xuất hiện: {tên 1}, {tên 2}, {tên 3}
+//   △ {Loại cỡ cảnh}: {mô tả hình ảnh chi tiết}
+//   △ {Loại cỡ cảnh}: {mô tả tiếp theo, có thể nhiều dòng △}
+//   {Tên nhân vật} ({chú thích cảm xúc/hành động trong ngoặc}): {lời thoại}
+//
+// Đây là parser dạng "cố gắng hết sức" (best-effort heuristic): input do LLM
+// sinh ra không phải lúc nào cũng hoàn hảo, nên khi gặp dòng không khớp
+// pattern nào, parser bỏ qua thay vì throw — tránh chặn toàn bộ luồng vì
+// một dòng lỗi định dạng nhỏ.
 
-const SIZE_MAP: Record<string, string> = {
-  "Toàn cảnh xa": "WIDE",
-  "Toàn cảnh": "WIDE",
-  "Cảnh trung": "MEDIUM",
-  "Trung cảnh": "MEDIUM",
-  "Cận cảnh": "CLOSE_UP",
-  "Đặc tả": "EXTREME_CLOSE_UP",
+// Giữ các literal string trùng khớp với enum Prisma (ShotSize) nhưng KHÔNG
+// import @prisma/client ở đây, để module này test được độc lập, không cần
+// `prisma generate` / kết nối DB.
+export type ShotSizeLiteral =
+  | "WIDE"
+  | "MEDIUM"
+  | "CLOSE_UP"
+  | "EXTREME_CLOSE_UP"
+  | "MONTAGE";
+
+export type ParsedDialogueLine = {
+  order: number;
+  characterName: string;
+  direction: string | null;
+  text: string;
 };
 
-export function mapShotSize(label: string): string {
-  const t = label.trim();
-  if (SIZE_MAP[t]) return SIZE_MAP[t];
-  for (const k of Object.keys(SIZE_MAP)) if (t.includes(k)) return SIZE_MAP[k];
-  return "MEDIUM";
+export type ParsedShot = {
+  order: number;
+  shotSize: ShotSizeLiteral;
+  description: string;
+  dialogue: ParsedDialogueLine[];
+};
+
+export type ParsedScene = {
+  order: number;
+  sceneNumber: number;
+  timeOfDay: string | null;
+  interiorExterior: string | null;
+  location: string;
+  subLocation: string | null;
+  charactersPresent: string[];
+  shots: ParsedShot[];
+};
+
+const SCENE_HEADER_RE = /^###\s*Cảnh\s+(\d+)-(\d+)\s*$/u;
+const CHARACTERS_LINE_RE = /^Nhân vật xuất hiện\s*[:：]\s*(.+)$/u;
+const SHOT_LINE_RE = /^△\s*([^:：]+)[:：]\s*(.*)$/u;
+const EMPTY_SCENE_RE = /^\[Cảnh trống\s*[:：]?\s*(.*)\]$/u;
+// "Tên nhân vật (ghi chú): lời thoại" — tên không chứa ':' hay dấu ngoặc mở
+// thừa; ghi chú trong ngoặc đơn là optional.
+const DIALOGUE_LINE_RE = /^([^():：\n]{1,40}?)\s*(?:\(([^)]*)\))?\s*[:：]\s*(.+)$/u;
+
+const SHOT_SIZE_MAP: Record<string, ShotSizeLiteral> = {
+  "toàn cảnh xa": "WIDE",
+  "toàn cảnh": "WIDE",
+  "cảnh trung": "MEDIUM",
+  "trung cảnh": "MEDIUM",
+  "cận cảnh": "CLOSE_UP",
+  "đặc tả": "EXTREME_CLOSE_UP",
+};
+
+function normalizeKey(s: string): string {
+  return s.trim().toLowerCase();
 }
 
-export function parseScriptRaw(raw: string, episodeIndex = 1): ParsedScene[] {
-  const scenes: ParsedScene[] = [];
-  const blocks = raw.split(/^###\s*Cảnh\s*/m).filter((s) => s.trim());
-  let n = 0;
-  for (const b of blocks) {
-    n += 1;
-    const lines = b.split("\n").map((l) => l.trim()).filter(Boolean);
-    if (!lines.length) continue;
-    const head = lines[0];
-    const mNum = head.match(/^(\d+)-(\d+)/);
-    const sceneNumber = mNum ? Number(mNum[2]) : n;
-    const locLine = lines[1] ?? "";
-    let timeOfDay: string | undefined;
-    let interiorExterior: string | undefined;
-    let location = "";
-    let subLocation: string | undefined;
-    const mIE = locLine.match(/(Sáng|Trưa|Chiều|Tối|Đêm|Bình minh|Hoàng hôn)?\s*(Nội|Ngoại)?\s*(.*)/);
-    if (mIE) {
-      timeOfDay = mIE[1] || undefined;
-      interiorExterior = mIE[2] || undefined;
-      const rest = (mIE[3] ?? "").replace(/^[·\-\s]+/, "");
-      const parts = rest.split("・").map((s) => s.trim()).filter(Boolean);
-      location = parts[0] ?? rest;
-      subLocation = parts[1];
-    } else {
-      location = locLine;
-    }
-    let charactersPresent: string[] = [];
-    const charLine = lines.find((l) => l.startsWith("Nhân vật xuất hiện:"));
-    if (charLine) charactersPresent = charLine.replace("Nhân vật xuất hiện:", "").split(",").map((s) => s.trim()).filter(Boolean);
+export function shotSizeFromLabel(label: string): ShotSizeLiteral {
+  return SHOT_SIZE_MAP[normalizeKey(label)] ?? "MEDIUM";
+}
 
-    const shots: ParsedShot[] = [];
-    for (const l of lines) {
-      if (l.startsWith("△")) {
-        const body = l.slice(1).trim();
-        const mShot = body.match(/^([^:：]+)[:：]\s*(.*)/);
-        const label = mShot ? mShot[1].trim() : "";
-        const desc = mShot ? mShot[2] : body;
-        if (/^\[Cảnh trống/.test(body) || /^\[Cảnh trống/.test(desc)) {
-          shots.push({ shotSize: "MONTAGE", description: body, dialogues: [] });
-        } else {
-          shots.push({ shotSize: mapShotSize(label), description: desc, dialogues: [] });
-        }
-      } else {
-        const mDlg = l.match(/^(.+?)\s*\(([^)]*)\)\s*[:：]\s*(.+)/);
-        if (mDlg) {
-          const d = { characterName: mDlg[1].trim(), direction: mDlg[2].trim() || undefined, text: mDlg[3].trim() };
-          if (shots.length) shots[shots.length - 1].dialogues.push(d);
-          else shots.push({ shotSize: "MEDIUM", description: "", dialogues: [d] });
-        }
-      }
+/** Tách dòng header cảnh: "{Thời gian} {Nội/Ngoại} {Địa điểm}・{Địa điểm phụ}" */
+function parseSceneHeaderLine(line: string): {
+  timeOfDay: string | null;
+  interiorExterior: string | null;
+  location: string;
+  subLocation: string | null;
+} {
+  const [mainPart, subLocationRaw] = line.split("・");
+  const tokens = mainPart.trim().split(/\s+/u);
+
+  let timeOfDay: string | null = null;
+  let interiorExterior: string | null = null;
+  const rest: string[] = [];
+
+  for (const tok of tokens) {
+    if (!interiorExterior && (tok === "Nội" || tok === "Ngoại")) {
+      interiorExterior = tok;
+    } else if (!timeOfDay && !interiorExterior && rest.length === 0) {
+      timeOfDay = tok;
+    } else {
+      rest.push(tok);
     }
-    void episodeIndex;
-    scenes.push({ sceneNumber, timeOfDay, interiorExterior, location, subLocation, charactersPresent, shots });
   }
+
+  return {
+    timeOfDay,
+    interiorExterior,
+    location: rest.join(" ") || mainPart.trim(),
+    subLocation: subLocationRaw ? subLocationRaw.trim() : null,
+  };
+}
+
+export function parseScriptRaw(scriptRaw: string): ParsedScene[] {
+  const lines = scriptRaw.replace(/\r\n/g, "\n").split("\n");
+
+  const scenes: ParsedScene[] = [];
+  let sceneOrder = 0;
+  let shotOrder = 0;
+  let dialogueOrder = 0;
+  let current: ParsedScene | null = null;
+  let expectingHeaderLine = false;
+
+  const pushShot = (shotSize: ShotSizeLiteral, description: string) => {
+    if (!current) return;
+    shotOrder += 1;
+    dialogueOrder = 0;
+    current.shots.push({ order: shotOrder, shotSize, description, dialogue: [] });
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    const headerMatch = SCENE_HEADER_RE.exec(line);
+    if (headerMatch) {
+      sceneOrder += 1;
+      shotOrder = 0;
+      current = {
+        order: sceneOrder,
+        sceneNumber: Number(headerMatch[2]),
+        timeOfDay: null,
+        interiorExterior: null,
+        location: "",
+        subLocation: null,
+        charactersPresent: [],
+        shots: [],
+      };
+      scenes.push(current);
+      expectingHeaderLine = true;
+      continue;
+    }
+
+    if (!current) continue; // bỏ qua nội dung trước block "### Cảnh" đầu tiên
+
+    const charMatch = CHARACTERS_LINE_RE.exec(line);
+    if (charMatch) {
+      current.charactersPresent = charMatch[1]
+        .split(/[,，、]/u)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      expectingHeaderLine = false;
+      continue;
+    }
+
+    if (expectingHeaderLine) {
+      const header = parseSceneHeaderLine(line);
+      current.timeOfDay = header.timeOfDay;
+      current.interiorExterior = header.interiorExterior;
+      current.location = header.location;
+      current.subLocation = header.subLocation;
+      expectingHeaderLine = false;
+      continue;
+    }
+
+    const emptyMatch = EMPTY_SCENE_RE.exec(line);
+    if (emptyMatch) {
+      pushShot("MONTAGE", emptyMatch[1] || "Cảnh trống / không lời");
+      continue;
+    }
+
+    const shotMatch = SHOT_LINE_RE.exec(line);
+    if (shotMatch) {
+      pushShot(shotSizeFromLabel(shotMatch[1]), shotMatch[2].trim());
+      continue;
+    }
+
+    const dialogueMatch = DIALOGUE_LINE_RE.exec(line);
+    if (dialogueMatch) {
+      const [, name, direction, text] = dialogueMatch;
+      if (current.shots.length === 0) {
+        // Chưa có shot nào phía trên — tạo shot ngầm định để chứa thoại độc lập.
+        pushShot("MEDIUM", `(Thoại độc lập của ${name.trim()})`);
+      }
+      const shot = current.shots[current.shots.length - 1];
+      dialogueOrder += 1;
+      shot.dialogue.push({
+        order: dialogueOrder,
+        characterName: name.trim(),
+        direction: direction ? direction.trim() : null,
+        text: text.trim(),
+      });
+      continue;
+    }
+
+    // Dòng không khớp pattern nào — bỏ qua (best-effort parser).
+  }
+
   return scenes;
+}
+
+/** Ước lượng thời lượng shot (giây) khi không có @duration rõ ràng — dùng cho preview UI. */
+export function estimateShotDurationSec(shot: ParsedShot): number {
+  const base = shot.dialogue.length > 0 ? 3 : 2.5;
+  const perWord = 0.12;
+  const words = shot.dialogue.reduce((acc, d) => acc + d.text.split(/\s+/u).length, 0);
+  return Math.round((base + words * perWord) * 10) / 10;
 }

@@ -1,19 +1,54 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { requireUser, err } from "@/lib/api";
-import { getWallet } from "@/lib/wallet";
-import { topUpAmounts } from "@/lib/mockData";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { withAuth } from "@/lib/routeAuth";
+import { apiError, apiOk } from "@/lib/apiError";
 
-export async function POST(req: Request) {
-  const u = await requireUser();
-  if (!u) return err("AUTH", "Chưa đăng nhập", 401);
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEMO_TOPUP !== "true") {
-    return err("NOT_CONFIGURED", "Nạp tiền demo đã bị tắt ở production. Cần tích hợp cổng thanh toán thật (PayOS/VNPay) qua /api/webhooks/payment.", 501);
-  }
-  const { amount } = await req.json().catch(() => ({}));
-  if (!amount || !topUpAmounts.includes(amount)) return err("VALIDATION", "Mệnh giá không hợp lệ", 422);
-  const w = await getWallet(u.id);
-  await prisma.wallet.update({ where: { id: w.id }, data: { balance: { increment: amount } } });
-  const tx = await prisma.transaction.create({ data: { walletId: w.id, type: "TOPUP", amount, description: `Nạp ${amount}đ` } });
-  return NextResponse.json({ ok: true, transaction: tx, payUrl: null, note: "Demo: cộng thẳng balance. Cắm PayOS/VNPay ở đây." }, { status: 201 });
+const TopupSchema = z.object({
+  amount: z.number().int().positive(),
+  method: z.enum(["card", "bank", "wallet", "invoice"]).default("card"),
+});
+
+function hasRealGateway() {
+  return Boolean(process.env.VNPAY_TMN_CODE || process.env.PAYOS_CLIENT_ID);
 }
+
+// POST /api/wallet/topup — tạo phiên thanh toán.
+//
+// Không có VNPAY_TMN_CODE/PAYOS_CLIENT_ID trong .env (mặc định khi chạy
+// local/demo) -> "demo mode": cộng tiền NGAY LẬP TỨC, không qua cổng thanh
+// toán thật — khớp đúng label nút hiện có trên FE: "Nạp ₫... (demo)".
+// Có key thật -> TODO: tạo payment session VNPay/PayOS, trả checkoutUrl, và
+// chờ POST /api/webhooks/payment xác nhận trước khi cộng tiền.
+export const POST = withAuth(async (req, { userId }) => {
+  const body = await req.json().catch(() => null);
+  const parsed = TopupSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(400, "VALIDATION_ERROR", "Dữ liệu nạp tiền không hợp lệ.", parsed.error.flatten());
+  }
+
+  if (hasRealGateway()) {
+    // TODO: tích hợp VNPay/PayOS thật — tạo payment session, trả checkoutUrl.
+    return apiError(501, "NOT_IMPLEMENTED", "Cổng thanh toán thật chưa được tích hợp — hoàn thiện app/api/wallet/topup/route.ts.");
+  }
+
+  const wallet = await prisma.wallet.upsert({
+    where: { userId },
+    update: { balance: { increment: parsed.data.amount } },
+    create: { userId, balance: parsed.data.amount, heldAmount: 0 },
+  });
+  await prisma.transaction.create({
+    data: {
+      walletId: wallet.id,
+      type: "TOPUP",
+      amount: parsed.data.amount,
+      description: `Nạp tiền (demo, phương thức: ${parsed.data.method})`,
+    },
+  });
+
+  return apiOk({
+    demo: true,
+    balance: wallet.balance,
+    heldAmount: wallet.heldAmount,
+    available: wallet.balance - wallet.heldAmount,
+  });
+});
