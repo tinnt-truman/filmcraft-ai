@@ -11,6 +11,18 @@ datasource db {
 }
 
 // ---------------------------------------------------------------------------
+// Cấu hình nền tảng (admin) — key/value đơn giản, hiện dùng cho override giá
+// theo JobType (key = "price:<JobType>"). Không lưu secret/API key ở đây —
+// key thật vẫn chỉ nằm trong .env, xem lib/platformSettings.ts.
+// ---------------------------------------------------------------------------
+
+model PlatformSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
 // Auth / User
 // ---------------------------------------------------------------------------
 

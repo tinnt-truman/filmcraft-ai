@@ -18,8 +18,8 @@ export const POST = withPublic(async (req) => {
   const out = await runPublicTool({
     jobType: "SHOT_IMAGE",
     targetType: "Tool:image-to-product",
-    execute: () =>
-      getImageProvider().generateImage({
+    execute: async () =>
+      (await getImageProvider()).generateImage({
         prompt: `${parsed.data.outputType}${parsed.data.description ? " — " + parsed.data.description : ""}`,
         referenceImageUrl: parsed.data.productImageUrl,
       }),

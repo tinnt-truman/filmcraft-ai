@@ -33,7 +33,7 @@ export const POST = withAuth(async (req, { userId, params }) => {
     targetId: episode.id,
     run: async (jobId) => {
       try {
-        const llm = getLlmProvider();
+        const llm = await getLlmProvider();
         const prompt = [
           `Dự án: ${episode.project.title}.`,
           episode.project.summary ? `Bối cảnh chung: ${episode.project.summary.fullSummary}` : "",

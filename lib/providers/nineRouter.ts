@@ -30,30 +30,30 @@
 //    NineRouterImageProvider/NineRouterVideoProvider bên dưới — có thể cần
 //    sửa lại path/shape request cho khớp.
 //
-// .env cần set:
-//   NINE_ROUTER_API_KEY=...                            (bắt buộc — lấy từ dashboard 9Router)
-//   NINE_ROUTER_BASE_URL=http://localhost:20128/v1      (tuỳ chọn — mặc định như trên)
-//   NINE_ROUTER_LLM_MODEL=cc/claude-opus-4-7             (VD — xem GET /v1/models)
-//   NINE_ROUTER_TTS_MODEL=...
-//   NINE_ROUTER_TTS_VOICE=...
-//   NINE_ROUTER_IMAGE_MODEL=...   (nếu bản 9Router của bạn có hỗ trợ sinh ảnh)
-//   NINE_ROUTER_VIDEO_MODEL=...   (nếu bản 9Router của bạn có hỗ trợ sinh video)
+// Cấu hình đọc qua lib/platformConfig.ts: DB override (set qua /admin ->
+// "Cấu hình AI") được ưu tiên hơn biến .env cùng tên — xem đó để biết danh
+// sách đầy đủ (NINE_ROUTER_API_KEY, NINE_ROUTER_BASE_URL,
+// NINE_ROUTER_*_MODEL, NINE_ROUTER_TTS_VOICE).
 
-export function nineRouterEnabled(): boolean {
-  return Boolean(process.env.NINE_ROUTER_API_KEY);
+import { getConfigValue } from "../platformConfig";
+
+export async function nineRouterEnabled(): Promise<boolean> {
+  return Boolean(await getConfigValue("NINE_ROUTER_API_KEY"));
 }
 
-export function nineRouterBaseUrl(): string {
-  return (process.env.NINE_ROUTER_BASE_URL || "http://localhost:20128/v1").replace(/\/+$/, "");
+export async function nineRouterBaseUrl(): Promise<string> {
+  const v = await getConfigValue("NINE_ROUTER_BASE_URL");
+  return (v || "http://localhost:20128/v1").replace(/\/+$/, "");
 }
 
 /** Đọc 1 biến model bắt buộc, báo lỗi rõ ràng (kèm cách tra đúng tên) nếu thiếu. */
-export function requireNineRouterModel(envVar: string, example: string): string {
-  const model = process.env[envVar];
+export async function requireNineRouterModel(envVar: string, example: string): Promise<string> {
+  const model = await getConfigValue(envVar);
   if (!model) {
+    const base = await nineRouterBaseUrl();
     throw new Error(
-      `Thiếu biến ${envVar} trong .env — set đúng tên model bạn đã kết nối trong 9Router ` +
-        `(gọi GET ${nineRouterBaseUrl()}/models hoặc xem dashboard 9Router để biết tên chính xác, VD: "${example}").`
+      `Thiếu cấu hình ${envVar} — set trong /admin (mục "Cấu hình AI") hoặc .env đúng tên model bạn đã kết nối ` +
+        `trong 9Router (gọi GET ${base}/models hoặc xem dashboard 9Router để biết tên chính xác, VD: "${example}").`
     );
   }
   return model;
@@ -61,11 +61,13 @@ export function requireNineRouterModel(envVar: string, example: string): string 
 
 /** POST JSON tới 9Router, trả về Response thô (caller tự đọc json()/arrayBuffer() tuỳ endpoint). */
 export async function nineRouterPost(path: string, body: unknown): Promise<Response> {
-  const res = await fetch(`${nineRouterBaseUrl()}${path}`, {
+  const base = await nineRouterBaseUrl();
+  const apiKey = await getConfigValue("NINE_ROUTER_API_KEY");
+  const res = await fetch(`${base}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.NINE_ROUTER_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   });

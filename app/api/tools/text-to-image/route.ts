@@ -18,7 +18,7 @@ export const POST = withPublic(async (req) => {
   const out = await runPublicTool({
     jobType: "SHOT_IMAGE",
     targetType: "Tool:text-to-image",
-    execute: () => getImageProvider().generateImage({ prompt: parsed.data.prompt, ratio: parsed.data.ratio }),
+    execute: async () => (await getImageProvider()).generateImage({ prompt: parsed.data.prompt, ratio: parsed.data.ratio }),
     resultUrlOf: (r) => r.url,
   });
   return apiOk(out, out.demo ? 200 : 202);

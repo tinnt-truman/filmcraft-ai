@@ -31,8 +31,8 @@ export const POST = withAuth(async (_req, { userId, params }) => {
     run: async (jobId) => {
       try {
         await prisma.videoProject.update({ where: { id: project.id }, data: { status: "GENERATING" } });
-        const imageProvider = getImageProvider();
-        const videoProvider = getVideoProvider();
+        const imageProvider = await getImageProvider();
+        const videoProvider = await getVideoProvider();
 
         for (const scene of project.scenes) {
           const { url: imageUrl } = await imageProvider.generateImage({

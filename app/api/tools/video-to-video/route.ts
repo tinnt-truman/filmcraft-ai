@@ -18,8 +18,8 @@ export const POST = withPublic(async (req) => {
   const out = await runPublicTool({
     jobType: "SHOT_VIDEO",
     targetType: "Tool:video-to-video",
-    execute: () =>
-      getVideoProvider().generateVideo({
+    execute: async () =>
+      (await getVideoProvider()).generateVideo({
         text: `${parsed.data.transformDescription} (cường độ: ${parsed.data.intensity})`,
         referenceImage: [],
         referenceAudio: [],

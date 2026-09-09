@@ -1,4 +1,5 @@
 import type { VideoProvider } from "./types";
+import { getConfigValue } from "../platformConfig";
 import { nineRouterEnabled, nineRouterPost, requireNineRouterModel } from "./nineRouter";
 
 /**
@@ -7,8 +8,8 @@ import { nineRouterEnabled, nineRouterPost, requireNineRouterModel } from "./nin
  * đúng trạng thái "đã xử lý xong nhưng chưa có provider thật được cắm vào".
  *
  * Để dùng model thật: set SEEDANCE_API_KEY (hoặc REPLICATE_API_TOKEN cho
- * Kling/Runway/Luma qua Replicate) trong .env rồi hoàn thiện
- * `RealVideoProvider` — gửi đúng shape request đã lắp ở
+ * Kling/Runway/Luma qua Replicate) trong .env (hoặc qua /admin -> "Cấu hình
+ * AI") rồi hoàn thiện `RealVideoProvider` — gửi đúng shape request đã lắp ở
  * lib/promptAssembler.ts (text + reference_image[] + reference_audio[]).
  */
 class MockVideoProvider implements VideoProvider {
@@ -59,7 +60,7 @@ class NineRouterVideoProvider implements VideoProvider {
     duration: number;
     generateAudio: boolean;
   }): Promise<{ url: string | null; lastFrameUrl: string | null }> {
-    const model = requireNineRouterModel("NINE_ROUTER_VIDEO_MODEL", "kling/kling-v2");
+    const model = await requireNineRouterModel("NINE_ROUTER_VIDEO_MODEL", "kling/kling-v2");
     const res = await nineRouterPost("/videos/generations", {
       model,
       prompt: input.text,
@@ -85,11 +86,12 @@ class NineRouterVideoProvider implements VideoProvider {
   }
 }
 
-export function getVideoProvider(): VideoProvider {
-  if (nineRouterEnabled() && process.env.NINE_ROUTER_VIDEO_MODEL) {
+export async function getVideoProvider(): Promise<VideoProvider> {
+  if ((await nineRouterEnabled()) && (await getConfigValue("NINE_ROUTER_VIDEO_MODEL"))) {
     return new NineRouterVideoProvider();
   }
-  if (process.env.SEEDANCE_API_KEY) {
+  const seedanceKey = await getConfigValue("SEEDANCE_API_KEY");
+  if (seedanceKey) {
     return new RealVideoProvider();
   }
   return new MockVideoProvider();

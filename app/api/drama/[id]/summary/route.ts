@@ -37,7 +37,7 @@ export const PATCH = withAuth(async (req, { userId, params }) => {
       targetId: project.id,
       run: async (jobId) => {
         try {
-          const llm = getLlmProvider();
+          const llm = await getLlmProvider();
           const prompt = [
             `Tóm tắt lại kịch bản cho dự án "${project.title}".`,
             project.summary ? `Bản hiện tại: ${project.summary.fullSummary}` : "",

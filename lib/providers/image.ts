@@ -1,4 +1,5 @@
 import type { ImageProvider } from "./types";
+import { getConfigValue } from "../platformConfig";
 import { nineRouterEnabled, nineRouterPost, requireNineRouterModel } from "./nineRouter";
 
 function hashColor(seed: string): [string, string] {
@@ -14,10 +15,10 @@ function hashColor(seed: string): [string, string] {
  * cần API key/network. Màu sắc suy ra từ prompt để mỗi ảnh khác nhau 1 chút,
  * đủ để phân biệt trong demo local.
  *
- * Để dùng model thật: set REPLICATE_API_TOKEN hoặc FAL_KEY trong .env rồi
- * hoàn thiện `RealImageProvider` (gọi Replicate/fal.ai, model SDXL/Flux;
- * dùng referenceImageUrl cho image-to-image / IP-Adapter để giữ nhân vật
- * nhất quán xuyên suốt series).
+ * Để dùng model thật: set REPLICATE_API_TOKEN hoặc FAL_KEY trong .env (hoặc
+ * qua /admin -> "Cấu hình AI") rồi hoàn thiện `RealImageProvider` (gọi
+ * Replicate/fal.ai, model SDXL/Flux; dùng referenceImageUrl cho
+ * image-to-image / IP-Adapter để giữ nhân vật nhất quán xuyên suốt series).
  */
 class MockImageProvider implements ImageProvider {
   async generateImage({ prompt, ratio }: { prompt: string; referenceImageUrl?: string | null; ratio?: string }) {
@@ -66,7 +67,7 @@ class NineRouterImageProvider implements ImageProvider {
     referenceImageUrl?: string | null;
     ratio?: string;
   }): Promise<{ url: string }> {
-    const model = requireNineRouterModel("NINE_ROUTER_IMAGE_MODEL", "openai/dall-e-3");
+    const model = await requireNineRouterModel("NINE_ROUTER_IMAGE_MODEL", "openai/dall-e-3");
     const size = ratio === "9:16" ? "1024x1792" : ratio === "16:9" ? "1792x1024" : "1024x1024";
     const res = await nineRouterPost("/images/generations", {
       model,
@@ -82,11 +83,13 @@ class NineRouterImageProvider implements ImageProvider {
   }
 }
 
-export function getImageProvider(): ImageProvider {
-  if (nineRouterEnabled() && process.env.NINE_ROUTER_IMAGE_MODEL) {
+export async function getImageProvider(): Promise<ImageProvider> {
+  if ((await nineRouterEnabled()) && (await getConfigValue("NINE_ROUTER_IMAGE_MODEL"))) {
     return new NineRouterImageProvider();
   }
-  if (process.env.REPLICATE_API_TOKEN || process.env.FAL_KEY) {
+  const replicateToken = await getConfigValue("REPLICATE_API_TOKEN");
+  const falKey = await getConfigValue("FAL_KEY");
+  if (replicateToken || falKey) {
     return new RealImageProvider();
   }
   return new MockImageProvider();

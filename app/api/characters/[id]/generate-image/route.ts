@@ -19,7 +19,7 @@ export const POST = withAuth(async (_req, { userId, params }) => {
     targetId: character.id,
     run: async (jobId) => {
       try {
-        const provider = getImageProvider();
+        const provider = await getImageProvider();
         const style = character.project.summary?.visualStyle ?? "";
         const prompt = `${character.visualDescription || character.name}. Phong cách: ${style}`;
         const { url } = await provider.generateImage({ prompt, ratio: "1:1" });

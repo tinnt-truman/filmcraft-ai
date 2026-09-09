@@ -1,11 +1,13 @@
 import type { TtsProvider } from "./types";
+import { getConfigValue } from "../platformConfig";
 import { nineRouterEnabled, nineRouterPost, requireNineRouterModel } from "./nineRouter";
 
 /**
  * Mock TTS — không sinh audio thật, chỉ ước lượng thời lượng theo số từ.
  *
- * Để dùng TTS thật: set ELEVENLABS_API_KEY trong .env rồi hoàn thiện
- * `RealTtsProvider` (ElevenLabs hỗ trợ tiếng Việt).
+ * Để dùng TTS thật: set ELEVENLABS_API_KEY trong .env (hoặc qua /admin ->
+ * "Cấu hình AI") rồi hoàn thiện `RealTtsProvider` (ElevenLabs hỗ trợ tiếng
+ * Việt).
  */
 class MockTtsProvider implements TtsProvider {
   async synthesize({ text }: { text: string; voiceId: string }) {
@@ -38,8 +40,8 @@ class RealTtsProvider implements TtsProvider {
  */
 class NineRouterTtsProvider implements TtsProvider {
   async synthesize({ text }: { text: string; voiceId: string }): Promise<{ url: string; durationSec: number }> {
-    const model = requireNineRouterModel("NINE_ROUTER_TTS_MODEL", "openai/tts-1");
-    const voice = process.env.NINE_ROUTER_TTS_VOICE || "alloy";
+    const model = await requireNineRouterModel("NINE_ROUTER_TTS_MODEL", "openai/tts-1");
+    const voice = (await getConfigValue("NINE_ROUTER_TTS_VOICE")) || "alloy";
     const res = await nineRouterPost("/audio/speech", { model, input: text, voice });
     const contentType = res.headers.get("content-type") || "audio/mpeg";
     const buffer = Buffer.from(await res.arrayBuffer());
@@ -51,11 +53,12 @@ class NineRouterTtsProvider implements TtsProvider {
   }
 }
 
-export function getTtsProvider(): TtsProvider {
-  if (nineRouterEnabled()) {
+export async function getTtsProvider(): Promise<TtsProvider> {
+  if (await nineRouterEnabled()) {
     return new NineRouterTtsProvider();
   }
-  if (process.env.ELEVENLABS_API_KEY) {
+  const elevenLabsKey = await getConfigValue("ELEVENLABS_API_KEY");
+  if (elevenLabsKey) {
     return new RealTtsProvider();
   }
   return new MockTtsProvider();

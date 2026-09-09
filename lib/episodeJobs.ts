@@ -133,7 +133,7 @@ export async function generateSegment(
     run: async (jobId) => {
       try {
         if (opts.waitFor) await opts.waitFor;
-        const videoProvider = getVideoProvider();
+        const videoProvider = await getVideoProvider();
         const result = await videoProvider.generateVideo(request);
         await prisma.segment.update({
           where: { id: segmentId },

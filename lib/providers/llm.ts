@@ -1,20 +1,22 @@
 import type { LlmProvider } from "./types";
+import { getConfigValue } from "../platformConfig";
 import { nineRouterEnabled, nineRouterPost, requireNineRouterModel } from "./nineRouter";
 
 /**
  * Mock LLM — chạy offline, không cần API key. Trả về văn bản giả lập nhưng
  * có cấu trúc hợp lý (đủ để FE hiển thị & test luồng end-to-end).
  *
- * Để dùng LLM thật: set ANTHROPIC_API_KEY hoặc OPENAI_API_KEY trong .env rồi
- * hoàn thiện `RealLlmProvider` bên dưới (gọi Anthropic Messages API /
- * OpenAI Chat Completions API với systemPrompt + prompt).
+ * Để dùng LLM thật: set ANTHROPIC_API_KEY hoặc OPENAI_API_KEY trong .env
+ * (hoặc qua /admin -> "Cấu hình AI") rồi hoàn thiện `RealLlmProvider` bên
+ * dưới (gọi Anthropic Messages API / OpenAI Chat Completions API với
+ * systemPrompt + prompt).
  */
 class MockLlmProvider implements LlmProvider {
   async generateText({ prompt }: { systemPrompt?: string; prompt: string }): Promise<string> {
     await new Promise((r) => setTimeout(r, 300));
     return [
       "[Nội dung do mock LLM provider sinh ra — thay ANTHROPIC_API_KEY/OPENAI_API_KEY",
-      " trong .env và hoàn thiện lib/providers/llm.ts để gọi model thật.]",
+      " trong .env (hoặc /admin -> Cấu hình AI) và hoàn thiện lib/providers/llm.ts để gọi model thật.]",
       "",
       `Yêu cầu gốc: ${prompt.slice(0, 400)}${prompt.length > 400 ? "…" : ""}`,
     ].join("\n");
@@ -38,7 +40,7 @@ class RealLlmProvider implements LlmProvider {
  */
 class NineRouterLlmProvider implements LlmProvider {
   async generateText(input: { systemPrompt?: string; prompt: string; maxTokens?: number }): Promise<string> {
-    const model = requireNineRouterModel("NINE_ROUTER_LLM_MODEL", "cc/claude-opus-4-7");
+    const model = await requireNineRouterModel("NINE_ROUTER_LLM_MODEL", "cc/claude-opus-4-7");
     const messages = [
       ...(input.systemPrompt ? [{ role: "system", content: input.systemPrompt }] : []),
       { role: "user", content: input.prompt },
@@ -57,11 +59,13 @@ class NineRouterLlmProvider implements LlmProvider {
   }
 }
 
-export function getLlmProvider(): LlmProvider {
-  if (nineRouterEnabled()) {
+export async function getLlmProvider(): Promise<LlmProvider> {
+  if (await nineRouterEnabled()) {
     return new NineRouterLlmProvider();
   }
-  if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY) {
+  const anthropicKey = await getConfigValue("ANTHROPIC_API_KEY");
+  const openaiKey = await getConfigValue("OPENAI_API_KEY");
+  if (anthropicKey || openaiKey) {
     return new RealLlmProvider();
   }
   return new MockLlmProvider();

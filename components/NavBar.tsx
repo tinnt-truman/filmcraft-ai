@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useSession, signOut } from "next-auth/react";
+import { useSession } from "next-auth/react";
 
 const links = [
   { href: "/", label: "Bàn làm việc" },
@@ -59,15 +59,17 @@ export default function NavBar() {
           <button className="hidden rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium sm:block">
             ở giữa · VN
           </button>
-          <button className="hidden sm:block">giúp đỡ</button>
+          <Link href="/support" className="hidden sm:block hover:text-black">
+            giúp đỡ
+          </Link>
           {status === "authenticated" ? (
-            <button
-              onClick={() => signOut({ callbackUrl: "/login" })}
-              title={session?.user?.email ?? "Đăng xuất"}
+            <Link
+              href="/profile"
+              title={session?.user?.email ?? "Trung tâm cá nhân"}
               className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-200 text-xs font-semibold text-gray-700 hover:bg-gray-300"
             >
               {(session?.user?.name ?? session?.user?.email ?? "T").slice(0, 1).toUpperCase()}
-            </button>
+            </Link>
           ) : (
             <Link
               href="/login"

@@ -10,6 +10,7 @@
 import { prisma } from "./prisma";
 import { enqueueJob } from "./queue";
 import { computeSettlement, estimateCost, PRICING } from "./pricing";
+import { getEffectiveCost } from "./platformSettings";
 import type { JobType } from "@prisma/client";
 
 export class InsufficientBalanceError extends Error {
@@ -53,7 +54,9 @@ export type CreateJobInput = {
 };
 
 export async function createGenerationJob(input: CreateJobInput) {
-  const estimatedCost = estimateCost(input.type);
+  // Ưu tiên giá admin đã override qua /admin (mục "Cấu hình AI"), nếu không
+  // có thì dùng giá mặc định thuần ở ./pricing.ts.
+  const estimatedCost = await getEffectiveCost(input.type);
   await holdWallet(input.userId, estimatedCost);
 
   const job = await prisma.generationJob.create({

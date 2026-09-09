@@ -33,6 +33,32 @@ type AdminJob = {
   user: { email: string };
 };
 
+type PricingEntry = { default: number; override: number | null; effective: number };
+type ProviderCapability = { active: string };
+type ConfigGroup = "nineRouter" | "llm" | "image" | "video" | "tts";
+type ConfigItem = {
+  key: string;
+  label: string;
+  secret: boolean;
+  group: ConfigGroup;
+  set: boolean;
+  source: "db" | "env" | "none";
+  value: string | null;
+};
+type PlatformData = {
+  pricing: Record<string, PricingEntry>;
+  providers: {
+    nineRouter: { enabled: boolean; baseUrl: string };
+    capabilities: {
+      llm: ProviderCapability;
+      image: ProviderCapability;
+      video: ProviderCapability;
+      tts: ProviderCapability;
+    };
+  };
+  config: ConfigItem[];
+};
+
 const fmt = (n: number) => n.toLocaleString("vi-VN");
 
 const statusBadge: Record<string, string> = {
@@ -42,16 +68,64 @@ const statusBadge: Record<string, string> = {
   FAILED: "bg-red-50 text-red-600",
 };
 
+const jobTypeLabel: Record<string, string> = {
+  SCRIPT: "Kịch bản",
+  SUMMARY: "Tóm tắt",
+  CHARACTER_IMAGE: "Ảnh nhân vật",
+  SHOT_IMAGE: "Ảnh cảnh quay",
+  SHOT_VIDEO: "Video cảnh quay",
+  VOICE: "Lồng tiếng",
+  STORYBOARD: "Bảng phân cảnh",
+};
+
+const capabilityLabel: Record<keyof PlatformData["providers"]["capabilities"], string> = {
+  llm: "Mô hình ngôn ngữ (kịch bản, tóm tắt)",
+  image: "Sinh ảnh",
+  video: "Sinh video",
+  tts: "Giọng nói (TTS)",
+};
+
+const groupLabel: Record<ConfigGroup, string> = {
+  nineRouter: "9Router (chung)",
+  llm: "Mô hình ngôn ngữ",
+  image: "Sinh ảnh",
+  video: "Sinh video",
+  tts: "Giọng nói (TTS)",
+};
+
+const groupOrder: ConfigGroup[] = ["nineRouter", "llm", "image", "video", "tts"];
+
+const sourceLabel: Record<ConfigItem["source"], string> = {
+  db: "đã set qua UI",
+  env: "đang lấy từ .env",
+  none: "chưa set",
+};
+
+const menuItems = [
+  { id: "overview", label: "Tổng quan" },
+  { id: "users", label: "Người dùng" },
+  { id: "jobs", label: "Job" },
+  { id: "platform", label: "Cấu hình AI" },
+] as const;
+
+type MenuId = (typeof menuItems)[number]["id"];
+
 export default function AdminPage() {
   const { data: session, status } = useSession();
+  const [menu, setMenu] = useState<MenuId>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [jobs, setJobs] = useState<AdminJob[] | null>(null);
+  const [platform, setPlatform] = useState<PlatformData | null>(null);
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [grantInputs, setGrantInputs] = useState<Record<string, string>>({});
+  const [priceInputs, setPriceInputs] = useState<Record<string, string>>({});
+  const [configInputs, setConfigInputs] = useState<Record<string, string>>({});
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [busyPriceType, setBusyPriceType] = useState<string | null>(null);
+  const [busyConfigKey, setBusyConfigKey] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
   const role = (session?.user as { role?: string } | undefined)?.role;
@@ -64,12 +138,14 @@ export default function AdminPage() {
       apiFetch<Stats>("/api/admin/stats"),
       apiFetch<{ users: AdminUser[] }>(`/api/admin/users${qs}`),
       apiFetch<{ jobs: AdminJob[] }>("/api/admin/jobs"),
+      apiFetch<PlatformData>("/api/admin/platform"),
     ])
-      .then(([s, u, j]) => {
+      .then(([s, u, j, p]) => {
         if (cancelled) return;
         setStats(s);
         setUsers(u.users);
         setJobs(j.jobs);
+        setPlatform(p);
         setError(null);
       })
       .catch((err) => {
@@ -120,6 +196,44 @@ export default function AdminPage() {
     }
   };
 
+  const savePrice = async (type: string, raw: string) => {
+    const value = raw.trim() === "" ? null : Number(raw);
+    if (value !== null && (!Number.isFinite(value) || value <= 0)) {
+      setError("Giá phải là số dương.");
+      return;
+    }
+    setBusyPriceType(type);
+    try {
+      const res = await apiFetch<{ pricing: Record<string, PricingEntry> }>("/api/admin/platform", {
+        method: "PATCH",
+        body: JSON.stringify({ pricing: { [type]: value } }),
+      });
+      setPlatform((prev) => (prev ? { ...prev, pricing: res.pricing } : prev));
+      setPriceInputs((s) => ({ ...s, [type]: "" }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lưu giá thất bại.");
+    } finally {
+      setBusyPriceType(null);
+    }
+  };
+
+  const saveConfig = async (key: string, raw: string) => {
+    const value = raw === "" ? null : raw;
+    setBusyConfigKey(key);
+    try {
+      const res = await apiFetch<{ providers: PlatformData["providers"]; config: ConfigItem[] }>("/api/admin/platform", {
+        method: "PATCH",
+        body: JSON.stringify({ config: { [key]: value } }),
+      });
+      setPlatform((prev) => (prev ? { ...prev, providers: res.providers, config: res.config } : prev));
+      setConfigInputs((s) => ({ ...s, [key]: "" }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lưu cấu hình thất bại.");
+    } finally {
+      setBusyConfigKey(null);
+    }
+  };
+
   if (status === "loading") {
     return <div className="mx-auto max-w-7xl px-6 py-20 text-center text-sm text-gray-400">Đang tải…</div>;
   }
@@ -145,148 +259,283 @@ export default function AdminPage() {
     <div className="mx-auto max-w-7xl px-6 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Quản trị hệ thống</h1>
-        <p className="text-sm text-gray-500">Người dùng, ví, job sinh nội dung — chỉ tài khoản ADMIN xem được.</p>
+        <p className="text-sm text-gray-500">Người dùng, ví, job sinh nội dung, cấu hình AI — chỉ tài khoản ADMIN xem được.</p>
       </div>
+
+      <nav className="mb-6 flex gap-1 border-b border-black/10">
+        {menuItems.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => setMenu(m.id)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
+              menu === m.id ? "border-black text-black" : "border-transparent text-gray-500 hover:text-black"
+            }`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </nav>
 
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
 
-      {stats && (
-        <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <StatCard label="Tổng user" value={fmt(stats.userCount)} />
-          <StatCard label="Dự án phim" value={fmt(stats.dramaCount)} />
-          <StatCard label="Video ngắn" value={fmt(stats.videoCount)} />
-          <StatCard label="Tổng nạp tiền" value={`${fmt(stats.totalTopupAmount)}đ`} />
-        </div>
+      {menu === "overview" && stats && (
+        <>
+          <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard label="Tổng user" value={fmt(stats.userCount)} />
+            <StatCard label="Dự án phim" value={fmt(stats.dramaCount)} />
+            <StatCard label="Video ngắn" value={fmt(stats.videoCount)} />
+            <StatCard label="Tổng nạp tiền" value={`${fmt(stats.totalTopupAmount)}đ`} />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(stats.jobsByStatus).map(([s, count]) => (
+              <span key={s} className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadge[s] ?? "bg-gray-100 text-gray-600"}`}>
+                {s}: {count}
+              </span>
+            ))}
+          </div>
+        </>
       )}
 
-      {stats && (
-        <div className="mb-8 flex flex-wrap gap-2">
-          {Object.entries(stats.jobsByStatus).map(([s, count]) => (
-            <span key={s} className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadge[s] ?? "bg-gray-100 text-gray-600"}`}>
-              {s}: {count}
-            </span>
-          ))}
-        </div>
+      {menu === "users" && (
+        <>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-bold">Người dùng</h2>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Tìm theo email/tên…"
+              className="w-56 rounded-lg border border-black/10 px-3 py-1.5 text-sm outline-none focus:border-black/30"
+            />
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-black/10 bg-white">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead className="border-b border-black/10 bg-black/[0.02] text-xs text-gray-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Email</th>
+                  <th className="px-4 py-2 font-medium">Tên</th>
+                  <th className="px-4 py-2 font-medium">Role</th>
+                  <th className="px-4 py-2 font-medium">Số dư</th>
+                  <th className="px-4 py-2 font-medium">Đang giữ</th>
+                  <th className="px-4 py-2 font-medium">Dự án</th>
+                  <th className="px-4 py-2 font-medium">Cấp tiền</th>
+                  <th className="px-4 py-2 font-medium">Quyền</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(users ?? []).map((u) => (
+                  <tr key={u.id} className="border-b border-black/5 last:border-0">
+                    <td className="px-4 py-2">{u.email}</td>
+                    <td className="px-4 py-2 text-gray-500">{u.name ?? "—"}</td>
+                    <td className="px-4 py-2">
+                      <span className={u.role === "ADMIN" ? "rounded-full bg-black px-2 py-0.5 text-xs font-semibold text-brand" : "text-xs text-gray-500"}>
+                        {u.role}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2">{fmt(u.wallet?.balance ?? 0)}đ</td>
+                    <td className="px-4 py-2 text-gray-500">{fmt(u.wallet?.heldAmount ?? 0)}đ</td>
+                    <td className="px-4 py-2 text-gray-500">{u._count.dramaProjects + u._count.videoProjects}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          value={grantInputs[u.id] ?? ""}
+                          onChange={(e) => setGrantInputs((s) => ({ ...s, [u.id]: e.target.value }))}
+                          placeholder="Số tiền"
+                          className="w-24 rounded-lg border border-black/10 px-2 py-1 text-xs outline-none focus:border-black/30"
+                        />
+                        <button
+                          onClick={() => grantBalance(u.id)}
+                          disabled={busyUserId === u.id}
+                          className="rounded-full border border-black/10 px-2.5 py-1 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
+                        >
+                          Cấp
+                        </button>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => toggleRole(u)}
+                        disabled={busyUserId === u.id}
+                        className="rounded-full border border-black/10 px-2.5 py-1 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
+                      >
+                        {u.role === "ADMIN" ? "Hạ quyền" : "Cấp admin"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {users && users.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                      Không có user nào khớp.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
 
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="text-lg font-bold">Người dùng</h2>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Tìm theo email/tên…"
-          className="w-56 rounded-lg border border-black/10 px-3 py-1.5 text-sm outline-none focus:border-black/30"
-        />
-      </div>
+      {menu === "jobs" && (
+        <>
+          <h2 className="mb-4 text-lg font-bold">Job gần đây</h2>
+          <div className="overflow-x-auto rounded-xl border border-black/10 bg-white">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead className="border-b border-black/10 bg-black/[0.02] text-xs text-gray-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">User</th>
+                  <th className="px-4 py-2 font-medium">Loại</th>
+                  <th className="px-4 py-2 font-medium">Trạng thái</th>
+                  <th className="px-4 py-2 font-medium">Ước tính</th>
+                  <th className="px-4 py-2 font-medium">Thực tế</th>
+                  <th className="px-4 py-2 font-medium">Lỗi</th>
+                  <th className="px-4 py-2 font-medium">Thời gian</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(jobs ?? []).map((j) => (
+                  <tr key={j.id} className="border-b border-black/5 last:border-0">
+                    <td className="px-4 py-2">{j.user.email}</td>
+                    <td className="px-4 py-2 text-gray-500">{j.type}</td>
+                    <td className="px-4 py-2">
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusBadge[j.status] ?? "bg-gray-100 text-gray-600"}`}>
+                        {j.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2">{fmt(j.estimatedCost)}đ</td>
+                    <td className="px-4 py-2">{j.actualCost != null ? `${fmt(j.actualCost)}đ` : "—"}</td>
+                    <td className="max-w-[240px] truncate px-4 py-2 text-xs text-red-600" title={j.error ?? undefined}>
+                      {j.error ?? "—"}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-gray-400">{new Date(j.createdAt).toLocaleString("vi-VN")}</td>
+                  </tr>
+                ))}
+                {jobs && jobs.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
+                      Chưa có job nào.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
-      <div className="mb-10 overflow-x-auto rounded-xl border border-black/10 bg-white">
-        <table className="w-full min-w-[900px] text-left text-sm">
-          <thead className="border-b border-black/10 bg-black/[0.02] text-xs text-gray-500">
-            <tr>
-              <th className="px-4 py-2 font-medium">Email</th>
-              <th className="px-4 py-2 font-medium">Tên</th>
-              <th className="px-4 py-2 font-medium">Role</th>
-              <th className="px-4 py-2 font-medium">Số dư</th>
-              <th className="px-4 py-2 font-medium">Đang giữ</th>
-              <th className="px-4 py-2 font-medium">Dự án</th>
-              <th className="px-4 py-2 font-medium">Cấp tiền</th>
-              <th className="px-4 py-2 font-medium">Quyền</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(users ?? []).map((u) => (
-              <tr key={u.id} className="border-b border-black/5 last:border-0">
-                <td className="px-4 py-2">{u.email}</td>
-                <td className="px-4 py-2 text-gray-500">{u.name ?? "—"}</td>
-                <td className="px-4 py-2">
-                  <span className={u.role === "ADMIN" ? "rounded-full bg-black px-2 py-0.5 text-xs font-semibold text-brand" : "text-xs text-gray-500"}>
-                    {u.role}
-                  </span>
-                </td>
-                <td className="px-4 py-2">{fmt(u.wallet?.balance ?? 0)}đ</td>
-                <td className="px-4 py-2 text-gray-500">{fmt(u.wallet?.heldAmount ?? 0)}đ</td>
-                <td className="px-4 py-2 text-gray-500">{u._count.dramaProjects + u._count.videoProjects}</td>
-                <td className="px-4 py-2">
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      value={grantInputs[u.id] ?? ""}
-                      onChange={(e) => setGrantInputs((s) => ({ ...s, [u.id]: e.target.value }))}
-                      placeholder="Số tiền"
-                      className="w-24 rounded-lg border border-black/10 px-2 py-1 text-xs outline-none focus:border-black/30"
-                    />
-                    <button
-                      onClick={() => grantBalance(u.id)}
-                      disabled={busyUserId === u.id}
-                      className="rounded-full border border-black/10 px-2.5 py-1 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
-                    >
-                      Cấp
-                    </button>
+      {menu === "platform" && platform && (
+        <>
+          <h2 className="mb-1 text-lg font-bold">Provider đang hoạt động</h2>
+          <p className="mb-4 text-sm text-gray-500">Tính từ cấu hình bên dưới (DB override, nếu có, được ưu tiên hơn .env) — có hiệu lực ngay khi lưu, không cần restart server.</p>
+          <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {(Object.keys(platform.providers.capabilities) as (keyof PlatformData["providers"]["capabilities"])[]).map((cap) => (
+              <div key={cap} className="rounded-xl border border-black/10 bg-white p-4">
+                <p className="text-xs text-gray-500">{capabilityLabel[cap]}</p>
+                <p className="mt-1 text-sm font-bold">{platform.providers.capabilities[cap].active}</p>
+              </div>
+            ))}
+          </div>
+
+          <h2 className="mb-1 text-lg font-bold">Cấu hình provider AI</h2>
+          <p className="mb-4 text-sm text-gray-500">
+            Nhập giá trị rồi bấm Lưu — API key được lưu trong DB nhưng{" "}
+            <span className="font-medium">không bao giờ hiển thị lại</span> qua giao diện này, chỉ báo đã set hay chưa. Để trống ô nhập rồi bấm Lưu để xoá override (quay về giá trị trong .env, nếu có).
+          </p>
+          <div className="mb-8 space-y-6">
+            {groupOrder.map((group) => {
+              const items = platform.config.filter((c) => c.group === group);
+              if (items.length === 0) return null;
+              return (
+                <div key={group} className="overflow-hidden rounded-xl border border-black/10 bg-white">
+                  <div className="border-b border-black/10 bg-black/[0.02] px-4 py-2 text-xs font-semibold text-gray-600">
+                    {groupLabel[group]}
                   </div>
-                </td>
-                <td className="px-4 py-2">
-                  <button
-                    onClick={() => toggleRole(u)}
-                    disabled={busyUserId === u.id}
-                    className="rounded-full border border-black/10 px-2.5 py-1 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
-                  >
-                    {u.role === "ADMIN" ? "Hạ quyền" : "Cấp admin"}
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {users && users.length === 0 && (
-              <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
-                  Không có user nào khớp.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                  <div className="divide-y divide-black/5">
+                    {items.map((item) => (
+                      <div key={item.key} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                        <div className="min-w-[200px] flex-1">
+                          <p className="text-sm font-medium">{item.label}</p>
+                          <p className="text-xs text-gray-400">
+                            {item.key} ·{" "}
+                            <span className={item.set ? "text-emerald-600" : "text-gray-400"}>{sourceLabel[item.source]}</span>
+                            {!item.secret && item.value ? ` · ${item.value}` : ""}
+                          </p>
+                        </div>
+                        <input
+                          type={item.secret ? "password" : "text"}
+                          value={configInputs[item.key] ?? ""}
+                          onChange={(e) => setConfigInputs((s) => ({ ...s, [item.key]: e.target.value }))}
+                          placeholder={item.secret ? (item.set ? "•••• đã set — nhập để đổi" : "Nhập API key") : item.value ?? "Chưa set"}
+                          className="w-56 rounded-lg border border-black/10 px-3 py-1.5 text-sm outline-none focus:border-black/30"
+                        />
+                        <button
+                          onClick={() => saveConfig(item.key, configInputs[item.key] ?? "")}
+                          disabled={busyConfigKey === item.key}
+                          className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
+                        >
+                          Lưu
+                        </button>
+                        {item.set && item.source === "db" && (
+                          <button
+                            onClick={() => saveConfig(item.key, "")}
+                            disabled={busyConfigKey === item.key}
+                            className="rounded-full border border-black/10 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Xoá
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
 
-      <h2 className="mb-4 text-lg font-bold">Job gần đây</h2>
-      <div className="overflow-x-auto rounded-xl border border-black/10 bg-white">
-        <table className="w-full min-w-[900px] text-left text-sm">
-          <thead className="border-b border-black/10 bg-black/[0.02] text-xs text-gray-500">
-            <tr>
-              <th className="px-4 py-2 font-medium">User</th>
-              <th className="px-4 py-2 font-medium">Loại</th>
-              <th className="px-4 py-2 font-medium">Trạng thái</th>
-              <th className="px-4 py-2 font-medium">Ước tính</th>
-              <th className="px-4 py-2 font-medium">Thực tế</th>
-              <th className="px-4 py-2 font-medium">Lỗi</th>
-              <th className="px-4 py-2 font-medium">Thời gian</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(jobs ?? []).map((j) => (
-              <tr key={j.id} className="border-b border-black/5 last:border-0">
-                <td className="px-4 py-2">{j.user.email}</td>
-                <td className="px-4 py-2 text-gray-500">{j.type}</td>
-                <td className="px-4 py-2">
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusBadge[j.status] ?? "bg-gray-100 text-gray-600"}`}>
-                    {j.status}
-                  </span>
-                </td>
-                <td className="px-4 py-2">{fmt(j.estimatedCost)}đ</td>
-                <td className="px-4 py-2">{j.actualCost != null ? `${fmt(j.actualCost)}đ` : "—"}</td>
-                <td className="max-w-[240px] truncate px-4 py-2 text-xs text-red-600" title={j.error ?? undefined}>
-                  {j.error ?? "—"}
-                </td>
-                <td className="px-4 py-2 text-xs text-gray-400">{new Date(j.createdAt).toLocaleString("vi-VN")}</td>
-              </tr>
-            ))}
-            {jobs && jobs.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
-                  Chưa có job nào.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+          <h2 className="mb-1 text-lg font-bold">Bảng giá theo loại job</h2>
+          <p className="mb-4 text-sm text-gray-500">Để trống ô &quot;Giá mới&quot; rồi bấm Lưu để xoá override và quay về giá mặc định.</p>
+          <div className="overflow-x-auto rounded-xl border border-black/10 bg-white">
+            <table className="w-full min-w-[700px] text-left text-sm">
+              <thead className="border-b border-black/10 bg-black/[0.02] text-xs text-gray-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Loại job</th>
+                  <th className="px-4 py-2 font-medium">Giá mặc định</th>
+                  <th className="px-4 py-2 font-medium">Đang override</th>
+                  <th className="px-4 py-2 font-medium">Giá hiệu lực</th>
+                  <th className="px-4 py-2 font-medium">Giá mới</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(platform.pricing).map(([type, p]) => (
+                  <tr key={type} className="border-b border-black/5 last:border-0">
+                    <td className="px-4 py-2">{jobTypeLabel[type] ?? type}</td>
+                    <td className="px-4 py-2 text-gray-500">{fmt(p.default)}đ</td>
+                    <td className="px-4 py-2 text-gray-500">{p.override != null ? `${fmt(p.override)}đ` : "—"}</td>
+                    <td className="px-4 py-2 font-semibold">{fmt(p.effective)}đ</td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          value={priceInputs[type] ?? ""}
+                          onChange={(e) => setPriceInputs((s) => ({ ...s, [type]: e.target.value }))}
+                          placeholder={String(p.effective)}
+                          className="w-24 rounded-lg border border-black/10 px-2 py-1 text-xs outline-none focus:border-black/30"
+                        />
+                        <button
+                          onClick={() => savePrice(type, priceInputs[type] ?? "")}
+                          disabled={busyPriceType === type}
+                          className="rounded-full border border-black/10 px-2.5 py-1 text-xs font-medium hover:bg-black/5 disabled:opacity-50"
+                        >
+                          Lưu
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

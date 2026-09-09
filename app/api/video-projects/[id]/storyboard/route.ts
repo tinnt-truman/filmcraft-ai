@@ -50,7 +50,7 @@ export const POST = withAuth(async (_req, { userId, params }) => {
       try {
         await prisma.videoProject.update({ where: { id: project.id }, data: { status: "GENERATING" } });
 
-        const llm = getLlmProvider();
+        const llm = await getLlmProvider();
         const prompt = [
           `Chủ đề: ${project.topic}`,
           `Đối tượng khán giả: ${project.audience}`,
